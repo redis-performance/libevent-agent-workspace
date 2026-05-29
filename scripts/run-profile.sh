@@ -17,7 +17,15 @@ BENCH_ARGS="${BENCH_ARGS:--n 100 -a 1 -w 100}"
 TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
 OUT_DIR="$WORKSPACE/experiments/$EXP/profile-results"
 PERF_DATA="$OUT_DIR/$TIMESTAMP-perf.data"
+PROFILE_TXT="$OUT_DIR/$TIMESTAMP-profile.txt"   # human-readable report — PRESERVED (not gitignored)
 mkdir -p "$OUT_DIR"
+
+# Tee everything below to the text report so the numbers are always preserved.
+# (select.sh reads profile-results/*.txt as the profiling context for the next round.)
+exec > >(tee "$PROFILE_TXT") 2>&1
+echo "# libevent profile — exp=$EXP host=$(uname -n) timestamp=$TIMESTAMP"
+echo "# libevent commit=$(git -C "$WORKSPACE/libevent" rev-parse HEAD 2>/dev/null || echo unknown)"
+echo ""
 
 BENCH="$(find "$BUILD" -name bench -type f -perm -u+x 2>/dev/null | head -1)"
 [[ -x "${BENCH:-}" ]] || { echo "ERROR: bench not found under $BUILD; run build-bench.sh." >&2; exit 1; }
