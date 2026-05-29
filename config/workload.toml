@@ -1,0 +1,29 @@
+# Benchmark workload parameters — VERSION CONTROLLED, IMMUTABLE.
+# Agents must NOT edit this file. Changing the workload invalidates baseline comparisons.
+# These drive libevent's own OSS benchmarks (test/bench.c, test/bench_cascade.c).
+
+[run]
+repetitions = 5          # real runs (median reported); raise if variance > 5%
+warmup = 1               # discarded warmup runs
+pin_cores = "2-5"        # taskset CPU set — keep fixed across baseline + experiment
+report_metric = "ns_per_event"   # ns/op per fired event; also records events/sec, syscalls
+
+# bench.c — pipe/event throughput. Fires writes across N pipes, A active, W writes each.
+[cascade]
+enabled = true
+num_pipes = 100          # bench.c -n
+num_active = 1           # bench.c -a
+num_writes = 100         # bench.c -w
+
+# bench_cascade.c — event-propagation latency (chain of events down N pipes).
+[cascade_chain]
+enabled = true
+num_pipes = 100
+
+# evbuffer data-plane workload (uses bench.c read/write paths under the loop).
+# Placeholder knobs for a future dedicated evbuffer microbench; cascade covers v1.
+[evbuffer]
+enabled = false
+read_size = 16384
+num_chains = 8
+move_by_reference = false

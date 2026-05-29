@@ -1,0 +1,44 @@
+# Hot-method manifest — which libevent symbols matter for optimization.
+#
+# This is the machine-readable list that scopes the benchmark, steers proposer agents,
+# and lets the chair reject proposals that touch cold / control-plane code.
+#
+# Seed values below are libevent's GENERIC hot paths, well known from the library's own
+# benchmarks and source structure. They are PLACEHOLDERS until populated by the first
+# `scripts/run-profile.sh` run — replace `cpu_pct: null` with measured inclusive CPU %
+# from the baseline profile, and re-rank.
+#
+# Format:
+#   symbol: <function name as it appears in perf report>
+#   file:   <libevent source file>
+#   tier:   <program.md tier 1-6>
+#   cpu_pct: <measured inclusive CPU %, or null if not yet profiled>
+#   note:   <why it matters / what to watch>
+
+version: 0                       # bump when re-profiled; 0 = unprofiled seed
+profiled_on: null                # machine + date once baseline profile exists
+
+data_plane:                      # Tier 1-2 — where the bytes flow
+  - { symbol: evbuffer_read,           file: buffer.c, tier: 2, cpu_pct: null, note: "readv from socket on ingress" }
+  - { symbol: evbuffer_write_atmost,   file: buffer.c, tier: 2, cpu_pct: null, note: "writev to socket on egress" }
+  - { symbol: evbuffer_drain,          file: buffer.c, tier: 1, cpu_pct: null, note: "consume parsed bytes" }
+  - { symbol: evbuffer_expand_fast_,   file: buffer.c, tier: 1, cpu_pct: null, note: "chain growth — allocation pressure" }
+  - { symbol: evbuffer_chain_new,      file: buffer.c, tier: 1, cpu_pct: null, note: "chain allocation — pooling candidate" }
+  - { symbol: evbuffer_add,            file: buffer.c, tier: 1, cpu_pct: null, note: "append bytes to a buffer" }
+  - { symbol: evbuffer_get_length,     file: buffer.c, tier: 1, cpu_pct: null, note: "called everywhere; keep O(1)/inlinable" }
+
+dispatch:                        # Tier 3-5 — the event loop
+  - { symbol: event_base_loop,         file: event.c,  tier: 4, cpu_pct: null, note: "the dispatch loop; everything is under it" }
+  - { symbol: event_process_active_single_queue, file: event.c, tier: 4, cpu_pct: null, note: "callback dispatch / activation queue" }
+  - { symbol: epoll_dispatch,          file: epoll.c,  tier: 5, cpu_pct: null, note: "backend poll wrapper around epoll_wait" }
+  - { symbol: epoll_nochangelist_add,  file: epoll.c,  tier: 3, cpu_pct: null, note: "epoll_ctl add path" }
+  - { symbol: evmap_io_add_,           file: evmap.c,  tier: 3, cpu_pct: null, note: "fd->event map; drives epoll_ctl churn" }
+  - { symbol: event_add_nolock_,       file: event.c,  tier: 3, cpu_pct: null, note: "event registration — re-arm churn" }
+
+# Control-plane / setup — change for CORRECTNESS only, never for speed.
+# Proposals targeting these should be rejected by the chair.
+cold_do_not_optimize:
+  - event_base_new
+  - evconnlistener_new
+  - bufferevent_socket_new
+  - bufferevent_setcb

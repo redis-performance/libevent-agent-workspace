@@ -1,0 +1,28 @@
+# Local-only notes / inputs — never committed
+.local/
+*.patch
+*.diff
+*.svg
+
+# Build artifacts
+build/
+build-*/
+.claude/worktrees/
+
+# perf data (large binary files)
+experiments/profile-results/*.data
+experiments/**/profile-results/*.data
+perf.data*
+*.perf
+
+# Local claude settings (credentials, env vars)
+.claude/settings.local.json
+
+# Editor / OS
+.vscode/
+*.swp
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
