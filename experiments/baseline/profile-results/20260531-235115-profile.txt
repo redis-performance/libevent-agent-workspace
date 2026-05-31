@@ -1,0 +1,13 @@
+# libevent profile — exp=baseline host=redis-benchmark-coordinator-c4.c.redislabs-cto.internal timestamp=20260531-235115
+# libevent commit=1b7cc9b58d6a5fdd5f33a43168245c2e1f35291f
+
+================ Phase 1 — cycle budget (the routing gate) ================
+WARNING: perf not found for kernel 6.14.0-1014
+
+  You may need to install the following packages for this specific kernel:
+    linux-tools-6.14.0-1014-gcp
+    linux-cloud-tools-6.14.0-1014-gcp
+
+  You may also want to install one of the following packages to keep up to date:
+    linux-tools-gcp
+    linux-cloud-tools-gcp
