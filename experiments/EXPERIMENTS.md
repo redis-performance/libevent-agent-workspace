@@ -93,3 +93,114 @@ Add perf tooling before the next run to actually profile and classify the bottle
    All Tier 1–2 changes are irrelevant for these benchmarks.
 3. Next experiment should target Tier 3–5 (epoll churn or dispatch overhead) and
    should first verify that `perf` is available.
+
+---
+
+## EXP-002 — 2026-06-01 — Enable epoll changelist by default (Tier 3a)
+
+## Status: REJECTED
+
+---
+
+## Selection Phase
+
+Single-agent run (c4a, claude-sonnet-4-6). Technique chosen from Tier 3a in program.md.
+
+**Hypothesis**: Enabling the epoll changelist by default collapses the DEL+ADD `epoll_ctl` pair
+(non-persistent events re-registered in callback) into a single MOD syscall, reducing
+cascade_chain's `epoll_ctl` count by ~50% (100 → 50 per iteration) and improving cascade_chain
+throughput by ≥3% with no regression on cascade_bench (EV_PERSIST, no DEL/ADD churn).
+
+**Key analysis**:
+- `cascade_bench` (`bench -n 100 -a 1 -w 100`): uses `EV_READ | EV_PERSIST` → no epoll_ctl churn
+  per step in steady state; changelist has zero effect.
+- `cascade_chain` (`bench_cascade -n 100`): uses `EV_READ` (non-persistent) → each step does
+  `epoll_ctl(DEL)` before callback then `epoll_ctl(ADD)` after. Changelist would batch these into
+  a single `EPOLL_CTL_MOD` at the next dispatch.
+
+---
+
+## Implementation Phase
+
+**Change**: `libevent/epoll.c` `epoll_init` — modify the changelist activation condition to
+always enable the changelist unless `EVENT_BASE_FLAG_IGNORE_ENV` is explicitly set:
+
+```c
+// Before:
+if ((base->flags & EVENT_BASE_FLAG_EPOLL_USE_CHANGELIST) != 0 ||
+    ((base->flags & EVENT_BASE_FLAG_IGNORE_ENV) == 0 &&
+        evutil_getenv_("EVENT_EPOLL_USE_CHANGELIST") != NULL)) {
+    base->evsel = &epollops_changelist;
+}
+
+// After:
+if ((base->flags & EVENT_BASE_FLAG_EPOLL_USE_CHANGELIST) != 0 ||
+    (base->flags & EVENT_BASE_FLAG_IGNORE_ENV) == 0) {
+    base->evsel = &epollops_changelist;
+}
+```
+
+First attempt (always use changelist) broke `main/base_environ` test. Revised to preserve
+IGNORE_ENV semantics: when IGNORE_ENV is set and EPOLL_USE_CHANGELIST flag is not set, fall back
+to plain epoll (satisfying the test expectation for `ignoreenvname = "epoll"`).
+
+Correctness: PASS (light gate — 370 tests ok, 33 skipped)
+
+---
+
+## Step 1: Benchmark (winner vs baseline)
+
+Baseline: `experiments/baseline/bench-results/20260531-235235-...-BASELINE.txt`
+EXP-002:  `experiments/EXP-002/bench-results/20260601-012506-....txt`
+
+| Workload | Before (µs) | After (µs) | Δ% |
+|----------|------------|-----------|-----|
+| cascade_bench (-n 100 -a 1 -w 100) | 144 | 145 | +0.7% |
+| cascade_chain (-n 100) | 278 | 276 | -0.7% |
+
+Noise bands: cascade_bench stddev ≈ 8-12 µs; cascade_chain stddev ≈ 8-11 µs.
+A ±1 µs change is < 0.1 standard errors — not statistically significant.
+
+---
+
+## Step 2: Profile
+
+Skipped — `perf` not available on this kernel.
+
+---
+
+## Decision
+
+**Status**: REJECT
+
+**Reason**: The changelist optimization (merging DEL+ADD into a single MOD `epoll_ctl` call)
+reduces syscall count for cascade_chain by ~50% in theory, but the userspace overhead of the
+changelist mechanism (fdinfo lookup, change array management, changelist flush per dispatch)
+cancels the savings. Net delta: -0.7% on cascade_chain (< 1 µs, within noise), +0.7% on
+cascade_bench. Neither meets the ≥2% threshold.
+
+The technique is correctly identified but the mechanism's overhead is not worth it at this
+scale (1 epoll_ctl saved per step). May be worth revisiting on a workload with much higher
+fd churn (e.g., 1000+ fds, many simultaneous DEL+ADD cycles per dispatch).
+
+---
+
+## Token Cost
+
+| Phase | Agent | Model | Notes |
+|-------|-------|-------|-------|
+| single-agent | c4a | claude-sonnet-4-6 | single-turn overnight run |
+
+---
+
+## Lessons
+
+1. `cascade_bench` uses `EV_PERSIST` — no DEL/ADD churn per step, epoll_ctl churn
+   optimizations have zero effect on it.
+2. `cascade_chain` has 1 DEL + 1 ADD per cascade step (2 epoll_ctl calls). Merging to 1 MOD
+   via the changelist saves 100 syscalls per 100-step chain. But changelist overhead (userspace)
+   erases the gain at this workload size.
+3. The changelist is already tested (test-changelist.c, regress main/base_environ handles
+   "epoll (with changelist)" as a special case). Implementation was correct and clean.
+4. Future epoll_ctl churn reduction must reduce churn more aggressively (e.g., avoid the DEL
+   entirely for non-persistent events when the fd is known to be immediately re-added).

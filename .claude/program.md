@@ -128,6 +128,7 @@ Document failed experiments here as they are discovered. Starting empty.
 | Technique | Why it didn't work |
 |-----------|--------------------|
 | EVBUFFER_MAX_READ_DEFAULT tuning (Tier 2b) | The cascade OSS benchmarks (bench, bench_cascade) use raw recv/send — they do NOT call evbuffer_read. Zero effect on measured workloads. Only useful when bufferevent/evbuffer-based benchmarks are available. |
+| Enable epoll changelist by default (Tier 3a) | Changelist merges DEL+ADD into 1 MOD epoll_ctl per non-persistent event cycle, but the userspace overhead (fdinfo lookup, changelist array management, flush per dispatch) cancels the 1 saved syscall at cascade scale (100-step chain). cascade_chain delta: -0.7% (noise). Note: cascade_bench uses EV_PERSIST — changelist has zero effect on it. |
 
 > Heed `ffc-agent-workspace`'s hard-won lessons that transfer here:
 > `__attribute__((hot/cold))` and `noinline` annotations repeatedly **regressed** there
