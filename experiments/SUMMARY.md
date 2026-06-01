@@ -5,7 +5,7 @@ Single source of truth for experiment status. Keep in sync with the README count
 | Status | Count |
 |--------|-------|
 | Accepted | 1 |
-| Rejected | 4 |
+| Rejected | 5 |
 | Parked | 0 |
 | In Progress | 0 |
 
@@ -25,6 +25,7 @@ Single source of truth for experiment status. Keep in sync with the README count
 | EXP-002 | 2026-06-01 | Enable epoll changelist by default (Tier 3a) | cascade_bench +0.7%, cascade_chain -0.7% (both noise) | Changelist userspace overhead (fdinfo lookup, array management) cancels the 1 saved epoll_ctl syscall per cascade step |
 | EXP-004 | 2026-06-01 | Zero-timeout fast path + changelist n_changes guard in epoll_dispatch (Tier 5a) | cascade_bench +0.7%, cascade_chain +0.4% (both noise) | Function call savings (~2 µs) invisible vs. 7 µs stddev; syscalls dominate, not userspace per-dispatch overhead |
 | EXP-005 | 2026-06-01 | EPOLLONESHOT for non-persistent events to skip epoll_ctl(DEL) (Tier 3/5) | Correctness fail | multiple_events_for_same_fd deadlock: EPOLLONESHOT fires and disables fd when first event fires, stranding other events on same fd; evmap only calls backend ADD for 0→1 transition |
+| EXP-006 | 2026-06-01 | timerfd absolute-deadline caching to skip redundant timerfd_settime (Tier 5a) | No change (dead code) | USING_TIMERFD is disabled when EVENT__HAVE_EPOLL_PWAIT2 is defined (Linux ≥5.11); the entire timerfd optimization path is compiled out; dispatch uses epoll_pwait2 with inline nanosecond timeout instead |
 
 ## Parked
 

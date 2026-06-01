@@ -484,3 +484,78 @@ Not reached (correctness gate failed).
 2. The `multiple_events_for_same_fd` regress test is the canary for this class of bug. It tests exactly the mixed persistent/non-persistent case on a shared fd.
 3. The remaining syscall reduction opportunity for cascade_chain (100 epoll_ctl DEL calls/run) requires either: (a) EPOLLONESHOT with deeper evmap integration, (b) fd-level state tracking to detect "last event on fd", or (c) accepting that the benchmark workload is structurally limited by the cascade architecture.
 4. Per-syscall cost: timerfd_settime ~30ns (EXP-003); epoll_ctl(DEL) estimated ~100-300ns. The DEL savings would be 3-10% on cascade_chain if correctly implemented.
+
+---
+
+## EXP-006 — 2026-06-01 — timerfd absolute-deadline caching to skip redundant timerfd_settime (Tier 5a)
+
+## Status: REJECTED
+
+---
+
+## Selection Phase
+
+Single-agent run (c4a, claude-sonnet-4-6).
+
+**Hypothesis**: cascade_chain calls timerfd_settime ~100× per run with a slightly-decreasing relative timeout that maps to an essentially-unchanged absolute deadline; skipping calls when `now + tv >= last_armed_abs` saves ~99 syscalls × 322ns ≈ 30µs → ~11% on cascade_chain.
+
+**Pre-implementation research**: measured timerfd_settime = 322ns/call (armed), clock_gettime = 32ns/call on this machine. Expected net gain: 99×322 − 100×32 = 28.6µs.
+
+---
+
+## Implementation Phase
+
+**Changes attempted** (reverted on reject):
+
+1. `epoll.c` — added two fields to `struct epollop`:
+   - `struct timespec timerfd_abs_fire`: absolute CLOCK_MONOTONIC deadline last armed for
+   - `int timerfd_fired`: flag set when timerfd appeared in epoll_wait results
+
+2. `epoll.c` — replaced the EXP-003 disarm-only skip with a three-case decision:
+   - `!is_armed && !was_armed`: skip (EXP-003 case)
+   - `is_armed && was_armed && !timerfd_fired`: compute `now + tv`, skip if ≥ `timerfd_abs_fire`
+   - all other transitions: call timerfd_settime, update `timerfd_abs_fire`
+
+3. `epoll.c` — events loop: `epollop->timerfd_fired = 1` when timerfd appears in results.
+
+**Critical discovery**: all changes are inside `#ifdef USING_TIMERFD`. On this machine, `EVENT__HAVE_EPOLL_PWAIT2` is defined (Linux 6.14 supports `epoll_pwait2` with nanosecond precision), which disables `USING_TIMERFD` at compile time. The code was **entirely dead** — no timerfd is used, no timerfd_settime is ever called.
+
+**Implication for EXP-003**: EXP-003's accepted change is also dead code (same `#ifdef USING_TIMERFD` block). The 144→141µs improvement reported for EXP-003 was measurement noise within the 8µs stddev, not a real optimization. The submodule commit is otherwise harmless (no behavior change).
+
+**Correctness gate**: PASS (light) — 370 tests ok. Changes were dead code, so no functional effect.
+
+---
+
+## Step 1: Benchmark
+
+| Workload | Before (µs) | After (µs) | Δ% |
+|----------|-------------|------------|----|
+| cascade_bench | 141 | 142 | +0.7% (noise) |
+| cascade_chain | 275 | 277 | +0.7% (noise) |
+
+Benchmark file: `experiments/EXP-006/bench-results/20260601-030927-redis-benchmark-coordinator-c4a.c.redislabs-cto.internal.txt`
+
+---
+
+## Decision
+
+**Status**: REJECT
+
+**Reason**: All changes were dead code (`USING_TIMERFD` is undefined because `epoll_pwait2` is available). No timerfd_settime calls exist in the actual execution path. The benchmark results (±0.7% on both workloads) are measurement noise. The real dispatch path is `epoll_pwait2` with inline nanosecond-precision timeout — no timerfd indirection.
+
+---
+
+## Token Cost
+
+| Phase | Agent | Model | Notes |
+|-------|-------|-------|-------|
+| single-agent | c4a | claude-sonnet-4-6 | single-turn overnight run |
+
+---
+
+## Lessons
+
+1. Always verify which preprocessor branches are actually active before optimizing within a `#ifdef` block. `USING_TIMERFD` is mutually exclusive with `EVENT__HAVE_EPOLL_PWAIT2`; the latter is defined on Linux ≥ 5.11.
+2. EXP-003's "accepted" improvement was noise — its change was also dead code. The true baseline for future experiments is approximately 141µs (cascade_bench) and 275µs (cascade_chain) but with no committed userspace optimization.
+3. With `epoll_pwait2` in use, there are **zero timerfd syscalls** in the hot path. All remaining libevent-side overhead is epoll_ctl churn (for cascade_chain non-persistent events) and userspace dispatch overhead — the exact bottlenecks already covered by EXP-002 through EXP-005.
+4. The actual cascade_chain syscall budget (per 100-event run): 100 epoll_ctl(ADD) setup + 100 epoll_pwait2 + 100 epoll_ctl(DEL) + 100 recv + 100 send ≈ 500 syscalls × ~550ns = 275µs. No slack remains except via epoll_ctl(DEL) elimination — which requires architectural evmap changes (see EXP-005 lesson).
