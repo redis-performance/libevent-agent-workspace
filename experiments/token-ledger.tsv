@@ -1,1 +1,2 @@
 exp_id	phase	agent_id	model	tokens_in	tokens_out	cost_usd	timestamp	description
+EXP-001	select+implement+verify+bench	claude	claude-sonnet-4-6	~50000	~8000	~0.20	20260601	Lazy epoll_ctl(DEL) deferral - single-agent full loop
