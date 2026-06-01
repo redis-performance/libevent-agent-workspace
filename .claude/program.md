@@ -127,6 +127,7 @@ Document failed experiments here as they are discovered. Starting empty.
 
 | Technique | Why it didn't work |
 |-----------|--------------------|
+| EVBUFFER_MAX_READ_DEFAULT tuning (Tier 2b) | The cascade OSS benchmarks (bench, bench_cascade) use raw recv/send — they do NOT call evbuffer_read. Zero effect on measured workloads. Only useful when bufferevent/evbuffer-based benchmarks are available. |
 
 > Heed `ffc-agent-workspace`'s hard-won lessons that transfer here:
 > `__attribute__((hot/cold))` and `noinline` annotations repeatedly **regressed** there
