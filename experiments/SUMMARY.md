@@ -5,7 +5,7 @@ Single source of truth for experiment status. Keep in sync with the README count
 | Status | Count |
 |--------|-------|
 | Accepted | 3 |
-| Rejected | 9 |
+| Rejected | 10 |
 | Parked | 0 |
 | In Progress | 0 |
 
@@ -32,6 +32,7 @@ Single source of truth for experiment status. Keep in sync with the README count
 | EXP-010 | 2026-06-01 | Skip update_time_cache for blocking dispatches with empty timer heap | Correctness fail | `event_base_gettimeofday_cached` requires update_time_cache for consistent time across all callbacks in a dispatch cycle; NONBLOCK guard in EXP-007 is a semantic boundary, not just a heuristic |
 | EXP-011 | 2026-06-01 | Lazy tv_cache populate in gettimeofday_cached + skip update_time_cache for empty heap | cascade_bench 0%, cascade_chain +0.7% (noise) | vDSO clock_gettime(MONOTONIC) is ~5-10ns on this GCP VM; 100 calls × 10ns = 1µs — below the ~19µs noise floor; time-cache optimizations are exhausted |
 | EXP-012 | 2026-06-01 | Tier 4a: hoist invariant endtime/max_to_process checks in event_process_active_single_queue | cascade_bench +0.7%, cascade_chain -0.7% (both noise) | Both benchmarks dispatch 1 event/cycle; per-event savings (2 comparisons × 1) = <1ns → <100ns/run_once; Tier 4 micro-opts exhausted for 1-event-per-cycle workloads |
+| EXP-013 | 2026-06-01 | Write-back gettime result to tv_cache to share clock read across event_add batch | cascade_bench -0.7%, cascade_chain -0.7% (both noise) | gettime cache-miss cost is ~20ns on this run (not ~80ns as estimated); 99 saved calls × 20ns = ~2µs — below the 2% threshold; clock cost varies with GCP VM load |
 
 ## Parked
 

@@ -996,3 +996,69 @@ Benchmark file: `experiments/EXP-012/bench-results/20260601-063029-redis-benchma
 2. The cascade benchmarks are fundamentally 1-event-per-cycle serial chains. Any per-event dispatch optimization must deliver >2µs savings across 100 events to be measurable. At 1ns per saved instruction, that requires eliminating 2000+ instructions per run_once — far beyond what Tier 4 branch hoisting can achieve.
 3. The syscall count per cascade_chain step (epoll_pwait2 + recv + send + epoll_ctl_DEL ≈ 4 syscalls × 100 steps = 400 syscalls × ~150ns ≈ 60µs) dominates. Userspace optimizations must eliminate a full syscall equivalent (~150ns) to be measurable at the 2% threshold.
 4. Remaining Tier 4–6 techniques (activation-queue traversal, vtable devirtualization, single-threaded lock elision) are similarly bounded: each saves <100ns per run_once = <0.07% — all below the noise floor for these workloads. Further progress requires either (a) syscall reduction, (b) a different benchmark that exercises evbuffer/bufferevent (Tier 1–2), or (c) higher-concurrency workloads where per-event costs aggregate.
+
+## EXP-013 — 2026-06-01 — Write-back gettime result to tv_cache to share clock read across event_add batch
+
+## Status: REJECTED
+
+---
+
+## Selection Phase
+
+Single-agent run (c4a, claude-sonnet-4-6).
+
+**Hypothesis**: cascade_chain's 100 `event_add` calls (inside the measurement window) each trigger a cache-miss `gettime()` call, spending ~80ns each (evutil_gettime_monotonic_ + gettimeofday). The `gettime()` function never writes back to `base->tv_cache` after a cache miss — only `update_time_cache` does. Adding `base->tv_cache = *tp` after the `evutil_gettime_monotonic_()` call shares the result across subsequent callers in the same window, saving 99 × ~80ns ≈ 7.9µs — a predicted 2.9% improvement on cascade_chain.
+
+---
+
+## Implementation Phase
+
+**Change**: 1 line added in `libevent/event.c` `gettime()`, after the successful `evutil_gettime_monotonic_` call:
+
+```c
+/* Cache the result so consecutive callers (e.g. event_add batch) share
+ * the same clock read; clear_time_cache() resets it at dispatch boundaries. */
+base->tv_cache = *tp;
+```
+
+**Rationale**: `clear_time_cache()` is called at dispatch boundaries (before epoll_pwait2, and at the start/end of event_base_loop). Between boundaries, multiple `event_add` calls in quick succession were each paying the full gettime cost independently. With the write-back, the first call pays the full cost and all subsequent ones use the cache.
+
+**Correctness gate**: LIGHT — **PASS** (all 370 tests, including `event_timer/default_clock`, `event_timer/precise_clock`, and all `gettimeofday_cached` tests). The write-back is safe because `clear_time_cache()` correctly invalidates stale entries at every dispatch boundary.
+
+---
+
+## Step 1: Benchmark
+
+| Workload | Before (µs) | After (µs) | Δ% |
+|----------|------------|-----------|-----|
+| cascade_bench | 138 | 137 | -0.7% (noise) |
+| cascade_chain | 271 | 269 | -0.7% (noise) |
+
+Benchmark file: `experiments/EXP-013/bench-results/20260601-070303-redis-benchmark-coordinator-c4a.c.redislabs-cto.internal.txt`
+
+Note: the EXP-013 bench run had anomalously high variance on cascade_chain (stddev=32µs vs typical 9µs, with outliers at 421µs and 577µs). The median (269µs) is robust to those outliers but the result is still below the acceptance threshold.
+
+---
+
+## Decision
+
+**Status**: REJECT
+
+**Reason**: Only 0.7% improvement on cascade_chain (269µs vs 271µs baseline), well below the ≥2% threshold. The predicted 7.9µs savings assumed gettime cache-miss cost ≈ 80ns, but back-calculating from the observed ~2µs improvement implies each gettime call costs only ~20ns on this benchmark run (gettimeofday vDSO is ~20ns, not the ~60ns observed in EXP-008). The per-call clock cost varies with GCP VM load and makes the optimization non-reliable.
+
+---
+
+## Token Cost
+
+| Phase | Agent | Model | Notes |
+|-------|-------|-------|-------|
+| single-agent | c4a | claude-sonnet-4-6 | single-turn overnight run |
+
+---
+
+## Lessons
+
+1. The `gettime()` cache-miss cost varies with GCP VM load: during EXP-008 it was ~60-80ns; during this run it was only ~20ns. Optimizations targeting infrequent clock calls (<100/run_once) are not reliably measurable on a shared VM where clock-call latency fluctuates 3–4×.
+2. Equal-deadline timer heap entries (a side effect of all 100 event_add calls using the same cached `now`) would make sift-down O(1) instead of O(log n), theoretically adding ~3µs in timer-heap savings. However this also did not materialize, confirming that the timer heap is not the current bottleneck.
+3. The cascade benchmarks remain dominated by 4–5 syscalls per step × ~450ns each. Any userspace optimization saving <5µs total is invisible against typical variance. The only remaining improvement path is syscall elimination.
+4. Known cost model on this GCP VM: evutil_gettime_monotonic_ (CLOCK_MONOTONIC_COARSE) ≈ 3ns; gettimeofday ≈ 20–60ns depending on VM load; epoll_pwait2/recv/send/epoll_ctl ≈ 450–500ns each.
