@@ -639,3 +639,84 @@ Note: cascade_chain showed high stddev (95µs vs baseline 8.5µs) due to measure
 2. `update_time_cache` is called after EVERY dispatch iteration, but is only consumed by (a) `timeout_process` when the heap is non-empty, (b) `event_persist_closure` when the event has a timeout, and (c) user code via `event_base_gettimeofday_cached`. For EVLOOP_NONBLOCK with an empty heap, none of these apply.
 3. The `event_base_gettimeofday_cached` API requires `update_time_cache` to pre-populate the cache for consistency within a dispatch round — but only for non-EVLOOP_NONBLOCK dispatches. The guard `!(flags & EVLOOP_NONBLOCK)` correctly scopes the optimization.
 4. Measuring actual syscall/library function costs on the target machine (not assuming VDSO or best-case numbers) is critical before dismissing an optimization as "too small to detect."
+
+---
+
+## EXP-008 — 2026-06-01 — Skip gettimeofday in update_time_cache (Tier 4c)
+
+## Status: ACCEPTED
+
+---
+
+## Selection Phase
+
+Single-agent run (c4a, claude-sonnet-4-6).
+
+**Hypothesis**: `update_time_cache(base)` calls `gettime(base, &base->tv_cache)`, which due to `CLOCK_SYNC_INTERVAL = -1` triggers a `gettimeofday` syscall on EVERY invocation (the condition `last_updated_clock_diff + (-1) < tp->tv_sec` is always true). For cascade_chain with 100 blocking dispatch iterations, this is 100 unnecessary gettimeofday calls — the cached monotonic time is all that's needed for timeout processing. The `gettimeofday` sync exists only for `event_base_gettimeofday_cached` accuracy, and `tv_clock_diff` remains accurate via `event_add_nolock_`'s own `gettime` calls. Replacing the `gettime(base, &base->tv_cache)` call in `update_time_cache` with a direct `evutil_gettime_monotonic_` call saves ~100 gettimeofday calls per cascade_chain run; if gettimeofday costs ~80ns on this VM (consistent with clock_gettime VDSO cost), saves ≈8µs = ~2.9%.
+
+**First attempt** (CLOCK_SYNC_INTERVAL = 0): broke `event_timer/default_clock` and `event_timer/precise_clock` regress tests, which call `evtimer_add` then immediately `evtimer_pending`. With CLOCK_SYNC_INTERVAL=0, the second event_add call in the same second skips gettimeofday, leaving a stale `tv_clock_diff`. Since `event_pending` converts monotonic deadlines to wall-clock via `tv_clock_diff`, the returned time was slightly too far in the future → `remaining > dur` → test failure.
+
+**Second attempt** (direct `evutil_gettime_monotonic_` in `update_time_cache`): Keeps `CLOCK_SYNC_INTERVAL = -1` unchanged in `gettime()`, so every explicit `gettime()` call (from `event_add_nolock_`, `timeout_next`, `timeout_process`) still syncs `tv_clock_diff`. Only `update_time_cache` changes: it calls `evutil_gettime_monotonic_` directly instead of the full `gettime`. The timer tests pass because `evtimer_add` calls `gettime()` which syncs `tv_clock_diff` before `evtimer_pending` is called.
+
+---
+
+## Implementation Phase
+
+**Change**: 1 line modified in `libevent/event.c`:
+
+```c
+// OLD:
+gettime(base, &base->tv_cache);
+
+// NEW:
+evutil_gettime_monotonic_(&base->monotonic_timer, &base->tv_cache);
+```
+
+In `update_time_cache` (static inline function). This bypasses the `CLOCK_SYNC_INTERVAL` check and the `gettimeofday` call, only updating the monotonic time cache.
+
+**Correctness maintained**: `tv_clock_diff` (used by `event_base_gettimeofday_cached` for wall-clock conversion) is still updated by:
+- `event_add_nolock_` → `gettime()` → gettimeofday sync (CLOCK_SYNC_INTERVAL=-1)
+- `timeout_next` → `gettime()` → cache hit (cheap, no gettimeofday)
+- `timeout_process` → `gettime()` → cache hit (cheap)
+
+Within any benchmark run, the wall-clock offset is accurate to within clock-drift rate since the last event_add call (typically < 1µs drift per second).
+
+**Impact on cascade_bench**: NONE. EXP-007 already skips `update_time_cache` entirely for EVLOOP_NONBLOCK + empty heap paths. The change is dead code for cascade_bench.
+
+---
+
+## Step 1: Benchmark
+
+| Workload | Before (µs) | After (µs) | Δ% |
+|----------|-------------|------------|----|
+| cascade_bench | 136 | 137 | +0.7% (noise) |
+| cascade_chain | 278 | 272 | **-2.2%** |
+
+Benchmark file: `experiments/EXP-008/bench-results/20260601-042646-redis-benchmark-coordinator-c4a.c.redislabs-cto.internal.txt`
+
+---
+
+## Decision
+
+**Status**: ACCEPT
+
+**Reason**: cascade_chain improved -2.2% (278→272µs median), above the ≥2% threshold. cascade_bench regression is +0.7% (136→137µs), within the ≤1% noise threshold. Full correctness gate: ASAN clean, 370/370 regress tests pass (including all gettimeofday_cached and event_timer tests). TSAN pre-existing infrastructure failure (kernel 6.14 memory mapping issue, documented in prior experiments).
+
+**Commit**: 563fa02e (libevent submodule)
+
+---
+
+## Token Cost
+
+| Phase | Agent | Model | Notes |
+|-------|-------|-------|-------|
+| single-agent | c4a | claude-sonnet-4-6 | single-turn overnight run |
+
+---
+
+## Lessons
+
+1. `CLOCK_SYNC_INTERVAL = -1` in `gettime()` causes a `gettimeofday` syscall on EVERY uncached `gettime` call (the condition `last_updated_clock_diff - 1 < tp->tv_sec` is always true since `last_updated_clock_diff` is set to `tp->tv_sec` at sync time). This is NOT a "never sync" setting despite the comment — it syncs on every call.
+2. `update_time_cache` is the main caller of `gettime()` in the dispatch loop. Bypassing the `gettimeofday` sync there saves significant work for workloads with many dispatch iterations (cascade_chain: 100 iterations × gettimeofday_cost).
+3. `tv_clock_diff` accuracy for `event_base_gettimeofday_cached` and `event_pending` is maintained by `event_add_nolock_`'s `gettime()` call (which still does full sync). The timer tests confirmed this: `evtimer_add` → `gettime()` → sync; `evtimer_pending` → uses fresh `tv_clock_diff`.
+4. When cascade_bench is already optimized (EXP-007 skips update_time_cache entirely), the next optimization target must focus on cascade_chain — which is dominated by 100 blocking epoll_wait calls, 100 epoll_ctl(ADD) in setup, 100 epoll_ctl(DEL) post-fire, and repeated time-related calls.
