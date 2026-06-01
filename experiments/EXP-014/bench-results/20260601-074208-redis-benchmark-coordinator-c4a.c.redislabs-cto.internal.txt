@@ -1,0 +1,19 @@
+# libevent benchmark run
+# exp=EXP-014 host=redis-benchmark-coordinator-c4a.c.redislabs-cto.internal timestamp=20260601-074208
+# cpu=
+# cores=2-5 repetitions=5 warmup=1
+# libevent=libevent (563fa02e)  commit=563fa02eb6f4a4f09dd92cbb6df5ae2377d8e697
+# metric=microseconds_per_run_once (lower is better)
+
+## cascade_bench
+   cmd        : bench -n 100 -a 1 -w 100
+   samples    : 125   (us per run_once, lower=better)
+   min        : 135
+   median(p50): 139
+   p95        : 156
+   p99        : 170
+   max        : 235
+   mean       : 142.62
+   stddev     : 10.89
+   raw_samples: 146 235 139 139 154 142 139 139 139 140 139 139 139 141 139 139 139 157 139 139 159 139 138 154 139 153 139 161 142 137 152 142 140 152 137 146 140 138 136 141 138 136 136 140 140 136 137 142 137 151 162 151 136 150 135 140 136 135 135 142 136 135 135 142 135 135 149 142 135 148 135 142 150 135 136 170 139 135 156 139 135 136 142 138 136 135 147 138 135 136 138 151 135 135 152 138 135 150 145 135 152 155 139 139 153 138 141 154 139 139 141 138 139 142 141 139 139 144 142 139 155 143 140 155 139
+
