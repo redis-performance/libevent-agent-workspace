@@ -201,3 +201,22 @@ risk concentrates in lifecycle (SSL bev + internal transport bev + zero-copy ref
 + the connect path + `get_fd`. **Perf caveat**: `bio_bufferevent_read` still `evbuffer_remove`-copies
 ciphertext into SSL, so the gain is the **recv-syscall elimination** (helps at high concurrency),
 not the zero-copy copy-elimination. Next step is the lifecycle-heavy prototype + ASAN + the panel.
+
+### Upstream contribution: bench_bufferevent (TLS coverage) — PR #1869
+
+Standalone TLS+plaintext socket-bufferevent throughput benchmark for upstream (independent of io_uring;
+fills a real gap — libevent had only event-loop and HTTP benches). Branch `tls-bufferevent-bench` off
+master. **Opened https://github.com/libevent/libevent/pull/1869.**
+
+Two 7-maintainer review rounds:
+- v1 NO-GO (28/100): caught **real OpenSSL-version portability blockers** (`EVP_RSA_gen` 3.0+,
+  `X509_getm_*` 1.1.0+, `TLS_*_method`) that would have broken the 1.0.2/1.1.1/LibreSSL CI jobs, plus
+  error-path leaks, autotools gating, a double-close — and a **false "hang"** (misread data flow).
+- Fixed the real items by mirroring `regress_openssl.c` (pre-baked PEM key, `SSLv23_method`,
+  `openssl-compat.h`); refuted the hang empirically (pairs=64×rounds=10000 completes).
+- v2 GO-WITH-FIXES (86/100, would-merge): the chair **refuted two panel false positives** itself — the
+  re-raised SSL "leak" (*"adding SSL_free would double-free"* — the bev owns ssl via BEV_OPT_CLOSE_ON_FREE)
+  and the hang. One mechanical nit (hoist loop decls) applied. Builds with/without OpenSSL, ASAN-clean.
+
+This is the 2nd upstream PR (after #1868). The review loop again earned its keep: real CI-portability bugs
+caught, false positives correctly refuted (by me from source, and by the chair).
