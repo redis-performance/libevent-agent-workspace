@@ -96,6 +96,25 @@ Both passed the `io_uring/*` regress group. Findings:
 the cheap, safe knobs do not improve it. The genuine remaining improvement is
 **correctness completeness, not throughput**: the documented timeout limitation
 (target #2, `IORING_OP_LINK_TIMEOUT` linked to each multishot recv). That is the
-change worth making — and the one azat is most likely to ask for — but it is a
-real feature (per-bufferevent linked-timeout SQE + timeout-CQE handling + tests),
-not a one-line tune. Scoped as the next step.
+change worth making — and the one azat is most likely to ask for.
+
+### Improvement #2 IMPLEMENTED: multishot read-timeout enforcement
+
+Branch `redis-performance/libevent:io-uring-read-timeout` (commit `d7493e51`, on top of
+PR #1866). Closes the documented limitation.
+
+- **Approach**: a libevent min-heap inactivity timer on the bufferevent (armed at multishot
+  submit, **reset on each data CQE**, fires `BEV_EVENT_READING|BEV_EVENT_TIMEOUT` + cancels the
+  multishot on idle). **Not `IORING_OP_LINK_TIMEOUT`** (the author's suggestion): a linked
+  timeout is a one-shot *deadline*, but libevent read timeouts are *inactivity* timeouts;
+  re-linking per CQE would defeat multishot. A socket-specific `adj_timeouts` makes
+  `bufferevent_set_timeouts()` work on a live multishot.
+- **Validation (c4)**: 2 regress tests (`read_timeout`, `read_timeout_after_enable`), each
+  **fails without the respective fix**; full regress **377/377 ok**; **ASAN clean**;
+  **throughput unchanged** (128p: 3035 vs 3048 — the timer is a no-op without a configured timeout).
+- **7-maintainer review**: **GO-WITH-FIXES, 82/100**, 6/7 green. The panel **validated the
+  design**: *"libevent min-heap timer WINS, decisively… LINK_TIMEOUT rejected. The author's
+  reasoning is correct."* Their one real blocker — `set_timeouts()`-after-enable silently
+  dropping the timeout (generic `adj_timeouts` can't see the out-of-epoll `ev_read`) — was a
+  genuine hole I'd under-weighted as a "doc footnote"; now fixed + regression-guarded. The two
+  style nits (merge the duplicate `if (trigger_user)`; comment the deferred arm) were folded in.
