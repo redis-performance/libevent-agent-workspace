@@ -5,7 +5,7 @@ Single source of truth for experiment status. Keep in sync with the README count
 | Status | Count |
 |--------|-------|
 | Accepted | 1 |
-| Rejected | 9 |
+| Rejected | 10 |
 | Parked | 0 |
 | In Progress | 0 |
 
@@ -57,6 +57,11 @@ Single source of truth for experiment status. Keep in sync with the README count
   Zero effect: cascade benchmarks return 1 event per `epoll_wait` (serial workload), so the
   event array never fills and the auto-grow path is never triggered. INITIAL_NEVENT only affects
   parallel workloads where N > INITIAL_NEVENT events fire simultaneously.
+- **EXP-011** (2026-06-01): EPOLLET instead of EPOLLONESHOT for non-persistent sole-watcher events
+  (Tier 3c) — **CORRECTNESS FAILURE** (not benchmarked). `main/simpleread`, `main/multiple`,
+  `main/fork` hang. EPOLLET misses pre-existing unread data on re-registration; the ONESHOT→MOD
+  re-arm triggers `ep_item_poll` (kernel readiness re-check) which is required for correctness.
+  EPOLLET only works when callbacks fully drain the fd to EAGAIN (not guaranteed by libevent API).
 
 ## Parked
 

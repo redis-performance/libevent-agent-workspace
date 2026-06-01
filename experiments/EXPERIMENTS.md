@@ -403,3 +403,73 @@ overhead on first batch differs.
 **Correctness**: PASS (370/370 regress tests). Reverted after reject.
 **Files**: `experiments/EXP-010/bench-results/20260601-052226-*.txt`
 **Known Non-Starter added**: see `.claude/program.md`
+
+---
+
+## EXP-011 — 2026-06-01 — EPOLLET instead of EPOLLONESHOT for non-persistent events — REJECTED
+
+**Technique (Tier 3c)**: Replace `EPOLLONESHOT` (EXP-004) with `EPOLLET` (edge-triggered,
+no auto-disarm) for non-persistent sole-watcher `EV_READ` events on `EV_FEATURE_ET` backends.
+With EPOLLET, the fd stays continuously armed in epoll after each fire. The re-arm call in the
+callback (`event_add`) can then skip `epoll_ctl(MOD)` entirely: the fd is already in epoll and
+the next data arrival fires a new EPOLLIN edge. This would eliminate 100 `epoll_ctl(MOD)` calls
+per cascade_chain `run_once` (currently paid after every ONESHOT re-arm).
+
+**Hypothesis**: Eliminating 100 `epoll_ctl(MOD)` re-arm calls per cascade_chain run_once (each
+~380 ns ≈ 38 µs total) should reduce cascade_chain latency by ~25% (155 µs → ~117 µs). The
+baseline comparison is EXP-010 (cascade_bench=106 µs, cascade_chain=155 µs).
+
+**Implementation** (evmap.c only, ~25 lines changed):
+- In `evmap_io_add_`: replace `EV_CHANGE_ONESHOT` with `EV_CHANGE_ET`; when `ctx->oneshot & 1`
+  is set (EPOLLET already armed, fd in epoll), skip `evsel->add` entirely (no epoll_ctl).
+- In `evmap_io_del_`: keep `ctx->oneshot` bits SET on the skip_del path (don't clear them), so
+  the next `evmap_io_add_` call knows the fd is still armed and can skip epoll_ctl.
+- `ctx->oneshot` field reinterpreted as "EPOLLET-armed state" instead of "ONESHOT-disarmed state".
+
+**Result**: REJECTED — correctness gate failure. `scripts/verify-correctness.sh` (light) failed
+with 3 test timeouts (signal 14 = SIGALRM = hang):
+- `main/simpleread` — FAILED (hang)
+- `main/multiple` — FAILED (hang)
+- `main/fork` — FAILED (hang)
+- `http/cancel_inactive_server` — TIMEOUT
+
+No benchmark was run.
+
+| Workload | EXP-010 µs (p50) | EXP-011 µs (p50) | Δ% |
+|----------|-----------------|-----------------|-----|
+| cascade_bench | 106 | NOT BENCHMARKED | — |
+| cascade_chain | 155 | NOT BENCHMARKED | — |
+
+**Root cause of rejection**: EPOLLET semantics are fundamentally incompatible with libevent's
+non-persistent event model in the general case. EPOLLET fires only on rising edges (transition
+from not-readable to readable). Level-triggered epoll (and EPOLLONESHOT-MOD re-arm) re-checks
+current fd readiness on each `epoll_ctl(MOD)` call — if data is already present in the pipe,
+`epoll_wait` returns it immediately on the next wait. EPOLLET with no MOD (just keeping the fd
+armed) MISSES data that was already present before the re-arm: no new edge occurs for pre-existing
+unread data. Any test that writes data before calling event_add, or that doesn't fully drain
+the fd in the callback, will hang waiting for an event that never fires.
+
+Specifically:
+- `simpleread`: writes to a pipe, then registers EV_READ. With EPOLLET, if data was already in
+  the pipe when `epoll_ctl(ADD)` ran and the initial edge was "consumed" by the first fire, a
+  re-arm of the same event finds no new edge → hangs.
+- `multiple` / `fork`: similar patterns with non-trivial read sequences.
+
+The cascade_chain pattern (which this was designed for) is a special case: each callback reads
+exactly all available data (1 byte recv, fully draining the pipe), then new data arrives as a
+new 1-byte write (fresh edge). EPOLLET works for this pattern but is unsafe in general.
+
+**Key learning**: EPOLLET without ONESHOT cannot replace ONESHOT for general-purpose non-
+persistent events. The ONESHOT→MOD re-arm path in EXP-004 serves a correctness function beyond
+the pure syscall-elimination benefit: the MOD triggers a readiness re-check (ep_item_poll in the
+kernel), which is the mechanism by which pre-existing unread data is re-delivered after
+re-registration. Any optimization that eliminates the MOD also eliminates this re-check.
+
+To use EPOLLET for non-persistent events without correctness regression, the system would need to
+guarantee that every callback fully drains the fd to EAGAIN before returning — a constraint not
+enforced by libevent's API or tests. Alternatively, a separate "EAGAIN-drained" flag per fd would
+need to be tracked and the re-arm decision conditioned on it. This is out of scope.
+
+**Correctness**: FAIL (simpleread, multiple, fork hang; cancel_inactive_server timeout). Reverted.
+**Files**: none (no bench run)
+**Known Non-Starter added**: see `.claude/program.md`
