@@ -4,7 +4,7 @@ Single source of truth for experiment status. Keep in sync with the README count
 
 | Status | Count |
 |--------|-------|
-| Accepted | 1 |
+| Accepted | 2 |
 | Rejected | 5 |
 | Parked | 0 |
 | In Progress | 0 |
@@ -16,6 +16,7 @@ Single source of truth for experiment status. Keep in sync with the README count
 | EXP | Date | Technique | Result | Commit |
 |-----|------|-----------|--------|--------|
 | EXP-003 | 2026-06-01 | Skip redundant timerfd_settime when already disarmed (Tier 5a) | cascade_bench -2.1%, cascade_chain -1.1% | aa7a4df5 |
+| EXP-007 | 2026-06-01 | Lazy update_time_cache: skip clock_gettime when EVLOOP_NONBLOCK + empty heap (Tier 4c) | cascade_bench -5.6%, cascade_chain 0% | a9437a38 |
 
 ## Rejected
 

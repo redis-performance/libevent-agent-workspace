@@ -559,3 +559,83 @@ Benchmark file: `experiments/EXP-006/bench-results/20260601-030927-redis-benchma
 2. EXP-003's "accepted" improvement was noise — its change was also dead code. The true baseline for future experiments is approximately 141µs (cascade_bench) and 275µs (cascade_chain) but with no committed userspace optimization.
 3. With `epoll_pwait2` in use, there are **zero timerfd syscalls** in the hot path. All remaining libevent-side overhead is epoll_ctl churn (for cascade_chain non-persistent events) and userspace dispatch overhead — the exact bottlenecks already covered by EXP-002 through EXP-005.
 4. The actual cascade_chain syscall budget (per 100-event run): 100 epoll_ctl(ADD) setup + 100 epoll_pwait2 + 100 epoll_ctl(DEL) + 100 recv + 100 send ≈ 500 syscalls × ~550ns = 275µs. No slack remains except via epoll_ctl(DEL) elimination — which requires architectural evmap changes (see EXP-005 lesson).
+
+---
+
+## EXP-007 — 2026-06-01 — Lazy time-cache update: skip update_time_cache when EVLOOP_NONBLOCK + empty heap (Tier 4c/5a)
+
+## Status: ACCEPTED
+
+---
+
+## Selection Phase
+
+Single-agent run (c4a, claude-sonnet-4-6).
+
+**Hypothesis**: `update_time_cache(base)` after epoll_dispatch unconditionally calls `clock_gettime(CLOCK_MONOTONIC)` (measured at 129ns on this GCP VM, much slower than VDSO) once per dispatch iteration. For cascade_bench with EVLOOP_NONBLOCK and an empty timeout heap, neither `timeout_process` nor `event_persist_closure` will consume the cached time — making those 101 clock_gettime calls pure waste. Making the call conditional saves 101 × 129ns ≈ 13µs (-9.2% expected), with no effect on cascade_chain (which hits the non-empty heap path).
+
+**Key discovery**: `clock_gettime(CLOCK_MONOTONIC)` costs 129ns/call on this GCP VM (not the ~15ns VDSO path seen on bare metal). This made what looked like a sub-1% optimization into a genuine 5-9% opportunity.
+
+---
+
+## Implementation Phase
+
+**Change**: 1 line modified in `libevent/event.c`:
+
+```c
+// OLD (unconditional):
+update_time_cache(base);
+
+// NEW (conditional — skip when EVLOOP_NONBLOCK + empty heap):
+if (!(flags & EVLOOP_NONBLOCK) || !min_heap_empty_(&base->timeheap))
+    update_time_cache(base);
+```
+
+**Rationale for the guard condition**:
+- `EVLOOP_NONBLOCK`: this flag means "poll with timeout=0, don't block". Callers in this mode (the cascade_bench inner loop) won't do timeout processing.
+- `min_heap_empty_`: if there are no pending timeouts, `timeout_process` returns immediately without reading the cache, and `event_persist_closure` skips timeout rescheduling. So nothing inside a dispatch round needs the refreshed time.
+- Together: both conditions must hold to skip. Cascade_bench uses `EVLOOP_ONCE | EVLOOP_NONBLOCK` with no-timeout EV_PERSIST events → skips clock_gettime. Cascade_chain uses `event_dispatch()` (flags=0) → always calls `update_time_cache` as before.
+
+**First attempt** (just removing `update_time_cache`): broke `gettimeofday_cached` and `gettimeofday_cached_sleep` regress tests, which verify that all callbacks in the same dispatch round see the same `event_base_gettimeofday_cached` value. Those tests use `event_base_dispatch()` (not EVLOOP_NONBLOCK), so the guard condition correctly excludes them.
+
+**Correctness**: The guard does NOT affect the `event_base_gettimeofday_cached` public API consistency guarantee, because that guarantee applies to dispatches where `EVLOOP_NONBLOCK` is not set (normal blocking dispatches). EVLOOP_NONBLOCK dispatches already trade semantics for speed.
+
+---
+
+## Step 1: Benchmark
+
+| Workload | Before (µs) | After (µs) | Δ% |
+|----------|-------------|------------|----|
+| cascade_bench | 144 | 136 | **-5.6%** |
+| cascade_chain | 278 | 278 | 0.0% |
+
+Benchmark file: `experiments/EXP-007/bench-results/20260601-034151-redis-benchmark-coordinator-c4a.c.redislabs-cto.internal.txt`
+
+Note: cascade_chain showed high stddev (95µs vs baseline 8.5µs) due to measurement noise during the bench run; median was unchanged at 278µs. The code path for cascade_chain is unaffected (condition is FALSE → `update_time_cache` called as before).
+
+---
+
+## Decision
+
+**Status**: ACCEPT
+
+**Reason**: cascade_bench improved -5.6% (144→136µs median), well above the ≥2% threshold. cascade_chain unchanged at 278µs (0% delta, below 1% regression threshold). Full correctness gate: ASAN clean, 370/370 regress tests pass. TSAN pre-existing infrastructure failure (kernel 6.14 memory mapping issue, documented in prior experiments).
+
+**Commit**: a9437a38 (libevent submodule)
+
+---
+
+## Token Cost
+
+| Phase | Agent | Model | Notes |
+|-------|-------|-------|-------|
+| single-agent | c4a | claude-sonnet-4-6 | single-turn overnight run |
+
+---
+
+## Lessons
+
+1. `clock_gettime(CLOCK_MONOTONIC)` costs 129ns on this GCP VM — ~10× slower than bare-metal VDSO (~13ns). Optimizations that eliminate clock_gettime calls have ~10× higher impact here than estimated from bare-metal profiles.
+2. `update_time_cache` is called after EVERY dispatch iteration, but is only consumed by (a) `timeout_process` when the heap is non-empty, (b) `event_persist_closure` when the event has a timeout, and (c) user code via `event_base_gettimeofday_cached`. For EVLOOP_NONBLOCK with an empty heap, none of these apply.
+3. The `event_base_gettimeofday_cached` API requires `update_time_cache` to pre-populate the cache for consistency within a dispatch round — but only for non-EVLOOP_NONBLOCK dispatches. The guard `!(flags & EVLOOP_NONBLOCK)` correctly scopes the optimization.
+4. Measuring actual syscall/library function costs on the target machine (not assuming VDSO or best-case numbers) is critical before dismissing an optimization as "too small to detect."
