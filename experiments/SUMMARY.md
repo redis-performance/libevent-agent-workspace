@@ -5,7 +5,7 @@ Single source of truth for experiment status. Keep in sync with the README count
 | Status | Count |
 |--------|-------|
 | Accepted | 1 |
-| Rejected | 7 |
+| Rejected | 8 |
 | Parked | 0 |
 | In Progress | 0 |
 
@@ -45,6 +45,13 @@ Single source of truth for experiment status. Keep in sync with the README count
   bits 2–3 (Tier 3/5 follow-on) — no improvement; cascade_chain 166→172 µs (+3.6%).
   The failed ADD is a kernel fast-path (EEXIST without readiness check); direct MOD triggers
   ep_item_poll and is no faster. ADD→EEXIST→MOD is already at optimum after EXP-004.
+
+## Rejected (continued)
+
+- **EXP-009** (2026-06-01): Fast path in `evmap_io_del_` for ONESHOT single-reader (Tier 4c) —
+  REJECTED. cascade_chain 172→154 µs (-10.5%), but unaffected cascade_bench also improved
+  124→107 µs (-13.7%) — confirms all improvement is machine load noise. Expected code saving
+  (~15 instructions × 100 events ≈ 1–2 µs) permanently below ~6 µs noise floor.
 
 ## Parked
 

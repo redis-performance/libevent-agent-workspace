@@ -311,3 +311,50 @@ re-arm pattern is at an optimum for the cascade_chain workload after EXP-004.
 **Correctness**: PASS (370/370 regress tests). Reverted after reject.  
 **Files**: `experiments/EXP-008/bench-results/20260601-040328-*.txt`  
 **Known Non-Starter added**: see `.claude/program.md`
+
+---
+
+## EXP-009 — 2026-06-01 — Fast path in `evmap_io_del_` for ONESHOT single-reader — REJECTED
+
+**Technique (Tier 4c)**: Add an early-exit fast path at the top of `evmap_io_del_` for the common
+cascade_chain case: sole EV_READ watcher with EPOLLONESHOT armed. The fast path skips computing
+`old` (3 conditional loads), `res` (3 conditional decrements), and `skip_del` (bitwise comparison)
+by detecting the ONESHOT single-watcher condition directly and returning after the minimum necessary
+writes (`ctx->nread = 0`, `ctx->oneshot &= ~1`, `LIST_REMOVE`).
+
+**Hypothesis**: `evmap_io_del_` is called 100× per cascade_chain run_once for non-persist EV_READ
+events under EPOLLONESHOT. A direct early-exit eliminates ~15 redundant operations per call, saving
+≥ 2 µs (≥ 1.3%) on cascade_chain (158–166 µs accepted baseline).
+
+**Result**: REJECTED — observed improvement matches machine-noise level; the unaffected control
+(cascade_bench) improved by as much or more at p50, making attribution to code impossible.
+
+| Workload | EXP-008 µs (p50) | EXP-009 µs (p50) | Δ% | Notes |
+|----------|-----------------|-----------------|-----|-------|
+| cascade_bench | 124 | 107 | **-13.7%** | EV_PERSIST — code change has NO effect |
+| cascade_chain | 172 | 154 | -10.5% | Our change only applies here |
+
+cascade_bench (the unaffected control) improved by 13.7% at p50 — more than cascade_chain — which
+confirms the entire observed delta is machine load improvement, not code improvement. cascade_bench
+min improved 5 µs (106→101), cascade_chain min improved 18 µs (167→149); the 13 µs residual
+at min slightly favors a real effect, but this is a single data point against contradictory p50
+evidence.
+
+**Root cause of rejection**: The expected code saving was ~300 ns–1.6 µs (15 skipped instructions ×
+100 events at 2.3 GHz). This is well below the ~6 µs run-to-run stddev (6.05–6.31 µs across both
+workloads). Machine load variation between runs accounts for 10–15 µs swings that swamp any
+instruction-level saving. A single-run benchmark at the current sample count (5×25 = 125 samples)
+cannot distinguish a 1–2 µs code improvement from noise when machine load varies that much.
+
+The `evmap_io_del_` fast path is logically correct (passes 370/370 regress tests) and slightly
+cleaner, but its performance impact is unmeasurable at this noise floor.
+
+**Key learning**: Instruction-level optimizations in the evmap_io_del_ hot path (~15 instructions
+per call) save < 2 µs per run_once — permanently below the noise floor for the current methodology.
+To measure sub-2 µs improvements, sample count would need to increase 5–10× (REPETITIONS=50–100)
+AND machine load would need to be controlled. The cascade benchmarks are at the practical optimum
+for userspace-only dispatch improvements.
+
+**Correctness**: PASS (370/370 regress tests). Reverted after reject.
+**Files**: `experiments/EXP-009/bench-results/20260601-043124-*.txt`
+**Known Non-Starter added**: see `.claude/program.md`
