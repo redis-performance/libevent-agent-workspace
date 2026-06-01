@@ -145,3 +145,48 @@ of a ONESHOT-disabled fd handles EEXIST via existing MOD fallback.
 
 **Files**: `experiments/EXP-004/bench-results/` (4 runs), libevent submodule commit 21a7111e
 
+---
+
+## EXP-005 — 2026-06-01 — `gettime` cache-warming for non-update_time_cache callers — REJECTED
+
+**Technique (Tier 5a)**: When `gettime(base, tp)` is called cold with `tp` pointing to a local
+variable (not `&base->tv_cache`), also warm `base->tv_cache` with the result so subsequent
+`gettime` calls within the same "cold window" return immediately. The primary target is the 100
+`event_add_nolock_` calls in cascade_chain's timed setup: each calls `gettime(base, &now)` cold,
+costing 100 monotonic clock calls; caching after the first reduces this to 1.
+
+**Hypothesis**: cascade_chain performs 100 `event_add()` calls in the timed window; all 100 call
+`evutil_gettime_monotonic_` through a cold `base->tv_cache`. Warming the cache on the first cold
+`gettime` call eliminates 99 redundant clock calls (~99 × 15 ns ≈ 1.5 µs), giving ≥2% improvement
+on cascade_chain (158 µs baseline → ≤155 µs).
+
+**Result**: REJECTED — no measurable improvement on either workload.
+
+| Workload | EXP-004 µs (p50) | EXP-005 µs (p50) | Δ% |
+|----------|------------------|------------------|----|
+| cascade_bench | 124 (machine load) | 124 (machine load) | 0% |
+| cascade_chain | 158 | 160 | +1.3% (noise; min 146 vs 149) |
+
+cascade_chain p50 is within one stddev of EXP-004's result. cascade_bench is identical. One
+cascade_chain sample was 858 µs (scheduler artifact), inflating mean/stddev; excluding it, the
+distribution is comparable to EXP-004.
+
+**Root cause of rejection**: The expected saving (~1.5 µs from 99 eliminated 15-ns vDSO
+`clock_gettime` calls) is an order of magnitude below the run-to-run noise floor (stddev 8–17 µs).
+The optimization is real but unmeasurable with the current benchmark sample count. Clock calls
+outside the dispatch loop (event_add setup) are vDSO-fast (~15 ns) and sum to only ~1.5 µs.
+
+**Key learning**: Confirms EXP-003's conclusion — **userspace savings smaller than ~3–5 µs
+per run_once are unmeasurable** at 5×25 samples on this machine. The change to `gettime` does
+no harm (370/370 tests pass, no semantic regression) but provides no measurable signal. Future
+experiments must eliminate ≥10+ µs of overhead to produce a reliable measurement.
+
+The second sub-technique tried (skip `update_time_cache` when heap empty) was REVERTED before
+benchmarking because it broke the `gettimeofday_cached` test contract: callbacks fired in the
+same dispatch iteration expect identical cached time (`tv1 == tv2 == tv3`), which requires
+`update_time_cache` to run unconditionally after every dispatch.
+
+**Correctness**: PASS (370/370 regress tests). Reverted after reject.  
+**Files**: `experiments/EXP-005/bench-results/20260601-025231-*.txt`  
+**Known Non-Starter added**: see `.claude/program.md`
+

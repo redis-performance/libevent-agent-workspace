@@ -5,7 +5,7 @@ Single source of truth for experiment status. Keep in sync with the README count
 | Status | Count |
 |--------|-------|
 | Accepted | 1 |
-| Rejected | 3 |
+| Rejected | 4 |
 | Parked | 0 |
 | In Progress | 0 |
 
@@ -29,6 +29,10 @@ Single source of truth for experiment status. Keep in sync with the README count
   `n_changes > 0` in `epoll_dispatch` (Tier 5a) — 0% on both workloads. ~10 ns/iter saving is
   below the machine noise floor (baseline stddev 9.85 µs). Benchmarks are 85–90% syscall-bound;
   sub-1% userspace savings are unmeasurable at 5×25 samples.
+- **EXP-005** (2026-06-01): `gettime` cache-warming for `event_add` timeout path (Tier 5a) — 0%
+  improvement. Expected saving (~1.5 µs from 99 eliminated vDSO clock calls) is below the 8–17 µs
+  noise floor. Confirms: userspace savings < ~3–5 µs per run_once are unmeasurable at current
+  sample count.
 
 ## Parked
 
