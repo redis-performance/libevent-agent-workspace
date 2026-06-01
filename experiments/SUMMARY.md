@@ -5,7 +5,7 @@ Single source of truth for experiment status. Keep in sync with the README count
 | Status | Count |
 |--------|-------|
 | Accepted | 1 |
-| Rejected | 6 |
+| Rejected | 7 |
 | Parked | 0 |
 | In Progress | 0 |
 
@@ -41,6 +41,10 @@ Single source of truth for experiment status. Keep in sync with the README count
   cascade_chain +3% (154→159 µs). O3 bloated the dispatch path and thrashed L1 icache.
   Confirms: compiler optimize/hot/cold pragmas on dispatch code consistently regress
   icache-sensitive loops.
+- **EXP-008** (2026-06-01): Skip `epoll_ctl(ADD→EEXIST)` on ONESHOT re-arm via `ctx->oneshot`
+  bits 2–3 (Tier 3/5 follow-on) — no improvement; cascade_chain 166→172 µs (+3.6%).
+  The failed ADD is a kernel fast-path (EEXIST without readiness check); direct MOD triggers
+  ep_item_poll and is no faster. ADD→EEXIST→MOD is already at optimum after EXP-004.
 
 ## Parked
 

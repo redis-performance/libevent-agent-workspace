@@ -259,3 +259,55 @@ cascade_bench suffered more (+17%) because its EV_PERSIST path has shorter callb
 **Correctness**: PASS (370/370 regress tests). Reverted after reject.
 **Files**: `experiments/EXP-007/bench-results/20260601-034411-*.txt`
 **Known Non-Starter added**: see `.claude/program.md`
+
+
+---
+
+## EXP-008 — 2026-06-01 — Skip redundant epoll_ctl(ADD→EEXIST) on ONESHOT re-arm — REJECTED
+
+**Technique (Tier 3/5 follow-on)**: After EXP-004's EPOLLONESHOT optimization, the `event_add`
+call following a fired non-persist event issues `epoll_ctl(EPOLL_CTL_ADD)` → fails with EEXIST
+(fd is ONESHOT-disabled but still in epoll) → retries `epoll_ctl(EPOLL_CTL_MOD)`. This wastes
+one failed kernel call per re-arm. The proposed fix: track "ONESHOT-disabled-but-present" state
+in bits 2–3 of `ctx->oneshot` in `evmap_io`, so `evmap_io_add_` can synthesize `old |= EV_READ`
+and have the op-table select `EPOLL_CTL_MOD` directly (no ADD→EEXIST round-trip).
+
+**Hypothesis**: Eliminating 100 failed `epoll_ctl(ADD)` calls per cascade_chain `run_once`
+(each ~100–150 ns) should reduce cascade_chain latency by ~10–15 µs (≥ 6%).
+
+**Implementation**: Three changes to `evmap.c`:
+1. Added bits 2–3 to `ctx->oneshot` to track "ONESHOT-disabled" fd state
+2. In `evmap_io_del_` skip_del path: set bit 2/3 instead of only clearing bit 0/1
+3. In `evmap_io_add_`: check bits 2/3 and include EV_READ/EV_WRITE in `old` so
+   epolltable selects MOD; clear bits 2/3 after add
+
+**Result**: REJECTED — no measurable improvement; cascade_chain showed marginal regression.
+
+| Workload | EXP-004 µs (p50) | EXP-008 µs (p50) | Δ% |
+|----------|------------------|------------------|----|
+| cascade_bench | 124 | 124 | 0% |
+| cascade_chain | 166 | 172 | +3.6% (regression) |
+
+Machine load indicator: cascade_bench = 124 µs in both runs (same load level).
+
+cascade_chain regressed from 166 to 172 µs. EXP-008 had stddev=6 µs (cleaner run than EXP-004's
+17 µs), making the 172 µs a reliable measurement. EXP-004's mean was 171.91 µs (very close to
+EXP-008's 173.88 µs), suggesting the 166 µs p50 in EXP-004 was partly a distribution artifact
+of its high-variance run. The true central tendency appears similar, with no improvement.
+
+**Root cause of rejection**: The `epoll_ctl(ADD→EEXIST→MOD)` path in Linux appears to be at
+least as fast as, if not faster than, direct `epoll_ctl(MOD)` for ONESHOT-disabled fds. Likely
+explanation: the failed ADD exits the kernel quickly (EEXIST fast-path in the rb-tree lookup
+without updating epitem state), while the successful MOD performs a full ep_item_poll readiness
+check (which can be non-trivial when the pipe already has data). The net cost of
+ADD(fast-fail)+MOD(full-update) ≤ MOD(full-update). Any saving is below the ~6–17 µs noise
+floor of this benchmark.
+
+**Key learning**: The ADD→EEXIST→MOD fallback in epoll_apply_one_change is not wasteful —
+the failed ADD is a kernel fast-path that avoids the readiness check. Attempting to bypass it
+with direct MOD does not help and may hurt due to different kernel code paths. The ONESHOT
+re-arm pattern is at an optimum for the cascade_chain workload after EXP-004.
+
+**Correctness**: PASS (370/370 regress tests). Reverted after reject.  
+**Files**: `experiments/EXP-008/bench-results/20260601-040328-*.txt`  
+**Known Non-Starter added**: see `.claude/program.md`
