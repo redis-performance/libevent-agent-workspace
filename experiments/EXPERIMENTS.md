@@ -65,3 +65,39 @@ consistent with baseline; first 4 reps (121-133 µs) reflect machine load during
 **Correctness**: PASS (370/370 regress tests). Reverted after identifying no-op.  
 **Files**: `experiments/EXP-002/bench-results/`, `experiments/EXP-002/EXP-002.md`  
 **Known Non-Starter added**: see `.claude/program.md`
+
+---
+
+## EXP-003 — 2026-06-01 — Guard epoll changelist flush on n_changes > 0 — REJECTED
+
+**Technique (Tier 5a)**: In `epoll_dispatch`, wrap `epoll_apply_changes(base)` and
+`event_changelist_remove_all_(&base->changelist, base)` behind `if (base->changelist.n_changes)`
+to skip both when the changelist is empty (always true for the default non-changelist `epollops` backend).
+
+**Hypothesis**: For the non-changelist `epollops` backend, `n_changes` is always 0 on entry to
+`epoll_dispatch`. `event_changelist_remove_all_` is a cross-TU function call (evmap.c → epoll.c,
+not inlinable at -O2 without LTO) costing ~8–12 ns/call. Eliminating 101 calls per cascade_bench
+`run_once` saves ~800–1200 ns, ≥2% of the 106 µs baseline.
+
+**Result**: 0% improvement. Both workloads unchanged within noise.
+
+| Workload | Baseline µs (p50) | EXP-003 µs (p50) | Δ% |
+|----------|-------------------|------------------|----|
+| cascade_bench | 106 | 106 | 0% |
+| cascade_chain | 192 | 192 | 0% |
+
+**Root cause of failure**: The per-call overhead of `event_changelist_remove_all_` for the
+n_changes=0 case (~8 ns: call + two no-op `event_changelist_check` + read + compare + write + return)
+and the already-inlined `epoll_apply_changes` loop body (dead iteration, ~2 ns) sum to ~10 ns/iter.
+Over 101 iterations: ~1010 ns = 0.95% of 106 µs baseline. The machine noise (baseline stddev 9.85 µs)
+swamps this sub-1% signal, yielding a measured Δ of exactly 0.
+
+**Key learning**: Both benchmarks are ~85–90% syscall-bound (epoll_pwait2 + recv + send + epoll_ctl).
+The remaining userspace overhead is ~100–200 ns per event_base_loop call — so a 1% win requires
+eliminating only ~1–2 ns of the ~100–200 ns. Individual function calls and loop checks are at that
+noise floor. Future experiments must target either (a) syscall count reduction or (b) a technique
+that affects many instructions per callback, not per-dispatch.
+
+**Correctness**: PASS (370/370 regress tests). Reverted after reject.  
+**Files**: `experiments/EXP-003/bench-results/`  
+**Known Non-Starter added**: see `.claude/program.md`
