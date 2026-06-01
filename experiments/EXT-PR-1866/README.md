@@ -171,3 +171,33 @@ chair's stated merge conditions ("fix the leak, the checkpatch decls, and the as
 **Net for PR #1866**: two upstreamable follow-ups — `io-uring-read-timeout` (82/100, closes the
 documented limitation) and `io-uring-zerocopy-recv` (a profile-driven +39% that the review loop
 turned from a UAF-carrying draft into a hardened, tested, bounded change).
+
+### TLS scope — confirmed empirically; integration scoped
+
+Question raised: "TLS excluded — fast path is plaintext socket bufferevents only?" **True.**
+Code: the io_uring hooks are entirely in `bufferevent_sock.c` (24 refs; **0** in
+`bufferevent_openssl.c`/`mbedtls`/`ssl`); the changelog says "io_uring acceleration for socket
+bufferevents." `bufferevent_openssl_socket_new(fd)` uses a **socket BIO** (`recv`/`send`), never
+the multishot path. (Only a TLS *filter* over an io_uring socket bev gets it, second-hand.)
+
+**Measured proof** — added `--ssl` to `test/bench_bufferevent_io` (branch `io-uring-zerocopy-recv`
+`f4fce954`) and ran syscall-vs-`--uring` on identical code/hardware:
+
+| workload | syscall | io_uring | Δ |
+|---|---:|---:|---:|
+| TLS 64 KiB ×64p | 1163 | 1207 | +3.8% (noise) |
+| TLS 64 KiB ×128p | 1173 | 1170 | −0.3% |
+| TLS 1 KiB ×64p | 201.8 | 201.4 | −0.2% |
+| plaintext 64 KiB ×64p | 2049 | 3785 | **+84.7%** |
+| plaintext 64 KiB ×128p | 2122 | 3521 | **+65.9%** |
+
+io_uring does **nothing** for TLS while delivering +66–85% for plaintext. TLS tops at ~1160 MiB/s
+(≈3× slower; decrypt + copies), all of it untouched by io_uring.
+
+**Integration design (scoped, not yet built)**: route `bufferevent_openssl_socket_new(fd)` through
+an internal io_uring **socket** bufferevent via `BIO_new_bufferevent` — i.e. fd-mode reuses the
+already-tested filter machinery (`bufferevent_ssl.c`'s `underlying` paths). Effort is moderate;
+risk concentrates in lifecycle (SSL bev + internal transport bev + zero-copy refs = three lifetimes)
++ the connect path + `get_fd`. **Perf caveat**: `bio_bufferevent_read` still `evbuffer_remove`-copies
+ciphertext into SSL, so the gain is the **recv-syscall elimination** (helps at high concurrency),
+not the zero-copy copy-elimination. Next step is the lifecycle-heavy prototype + ASAN + the panel.
