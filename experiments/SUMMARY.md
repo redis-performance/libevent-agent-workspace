@@ -5,7 +5,7 @@ Single source of truth for experiment status. Keep in sync with the README count
 | Status | Count |
 |--------|-------|
 | Accepted | 1 |
-| Rejected | 12 |
+| Rejected | 13 |
 | Parked | 0 |
 | In Progress | 0 |
 
@@ -73,6 +73,11 @@ Single source of truth for experiment status. Keep in sync with the README count
   Confirmed by construction: cascade benchmarks use raw `recv`/`send`, never calling `evbuffer_read`.
   Entire Tier 1–2 evbuffer space is inapplicable to current bench suite. Technique is valid for
   evbuffer workloads (e.g., bench_http + wrk) but unmeasurable without an HTTP load generator.
+- **EXP-014** (2026-06-01): Tier 6b cross-thread notify skip — guard `EVBASE_NEED_NOTIFY` in
+  `event_callback_activate_nolock_` behind `base->th_base_lock != NULL`. cascade_bench: 107→108 µs
+  (+0.9%, noise), cascade_chain: 154→154 µs (0%). Expected saving ~400 ns (1 BSS load × 100
+  activations) is permanently below the 5–7 µs noise floor. Formally closes the last untried Tier
+  6 technique. All program.md tiers are now exhausted for the current cascade benchmark suite.
 
 ## Parked
 

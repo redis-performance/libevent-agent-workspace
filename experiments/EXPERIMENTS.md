@@ -558,3 +558,30 @@ the techniques are sound but unmeasurable.
 evbuffer-based workloads. It belongs in the "needs bench_http" category, not "doesn't work."
 
 **Files**: `experiments/EXP-013/bench-results/20260601-063526-*.txt`
+
+---
+
+## EXP-014 — 2026-06-01 — Tier 6b cross-thread notify skip in `event_callback_activate_nolock_` — REJECTED
+
+**Technique (Tier 6b)**: Guard `EVBASE_NEED_NOTIFY(base)` in `event_callback_activate_nolock_` (and its `_later_` variant) behind `base->th_base_lock != NULL`. In single-threaded mode the lock pointer is NULL, so the guard short-circuits before evaluating `EVBASE_NEED_NOTIFY`. This also added `#ifndef EVENT__DISABLE_THREAD_SUPPORT` wrappers around both notify checks.
+
+**Hypothesis**: In single-threaded mode (`base->th_base_lock == NULL`), guarding `EVBASE_NEED_NOTIFY` with a null-lock early-out saves one BSS pointer load (~4 ns per call) per event activation. For 100–101 activations per run_once, total saving ≈ 400 ns (~0.4% of 107 µs baseline). Expected: < 0.5% improvement, REJECT as below the 5–7 µs noise floor. This formally closes Tier 6b.
+
+**Implementation**: Two-site change in `event.c`:
+- `event_callback_activate_nolock_` (line ~3133): replaced bare `if (EVBASE_NEED_NOTIFY(base))` with `#ifndef EVENT__DISABLE_THREAD_SUPPORT / if (base->th_base_lock && EVBASE_NEED_NOTIFY(base)) / #endif`
+- `event_callback_activate_later_nolock_` (line ~3149): same pattern
+
+**Result**: REJECTED — 0% improvement on both workloads.
+
+| Workload | EXP-013 µs (p50) | EXP-014 µs (p50) | Δ% | Notes |
+|----------|-----------------|-----------------|-----|-------|
+| cascade_bench | 107 | 108 | +0.9% | within noise (stddev ~10.24 µs) |
+| cascade_chain | 154 | 154 | 0% | identical |
+
+**Root cause of rejection**: `EVBASE_NEED_NOTIFY` already short-circuits on `evthread_id_fn_ == NULL` (the global BSS function pointer is NULL when no pthreads initialized). The guard merely replaces one pointer load (`evthread_id_fn_`) with another (`base->th_base_lock`) — both L1-resident after warmup, both ~4 ns. Net saving ≈ 0 ns per call. For 100 activations × ~0 ns = 0 ns total — permanently below the 5–7 µs noise floor.
+
+**Key learning**: This is the **last formally untried Tier 3–6 technique** in the program.md playbook. All dispatch-path optimizations for the cascade benchmark suite are now exhausted. The cascade benchmarks are ~85–90% syscall-bound; the entire userspace dispatch path (including activation, queueing, and callback dispatch) represents only ~10–15 µs of the ~106 µs total. No single-function or single-instruction optimization to that path can produce a ≥ 2 µs saving detectable above the 5–7 µs noise floor. Confirmed path forward: add `bench_http` + HTTP load generator (`wrk`/`ab`) to `run-bench.sh` to expose the evbuffer Tier 1–2 techniques (chain pooling, `EVBUFFER_MAX_READ` tuning, iovec sizing) which are predicted to give 5–25% improvement but are invisible to the current cascade suite.
+
+**Correctness**: PASS (370/370 regress tests). Reverted after reject.
+**Files**: `experiments/EXP-014/bench-results/20260601-071600-*.txt`
+**Known Non-Starter added**: see `.claude/program.md`

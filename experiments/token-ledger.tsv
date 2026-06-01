@@ -8,3 +8,4 @@ EXP-009	select+implement+verify+bench	claude	claude-sonnet-4-6	~85000	~9000	~0.3
 EXP-011	select+implement+verify	claude	claude-sonnet-4-6	~55000	~7000	~0.22	20260601	EPOLLET instead of EPOLLONESHOT for non-persist events - REJECTED correctness failure
 EXP-012	select+implement+verify+bench	claude	claude-sonnet-4-6	~95000	~11000	~0.38	20260601	Tier 6a single-threaded fast path (with_lock cache) - REJECTED below noise floor
 EXP-013	select+implement+verify+bench	claude	claude-sonnet-4-6	~110000	~12000	~0.44	20260601	Tier 2a NUM_READ_IOVEC 4→8 (buffer.c) - REJECTED 0% delta (cascade bypasses evbuffer)
+EXP-014	select+implement+verify+bench	claude	claude-sonnet-4-6	~120000	~13000	~0.48	20260601	Tier 6b cross-thread notify skip (event_callback_activate_nolock_) - REJECTED below noise floor
