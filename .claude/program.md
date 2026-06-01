@@ -123,10 +123,12 @@ Elide cross-thread notify when single-threaded.
 
 ## Known Non-Starters (do not retry)
 
-Document failed experiments here as they are discovered. Starting empty.
+Document failed experiments here as they are discovered.
 
 | Technique | Why it didn't work |
 |-----------|--------------------|
+| **EPOLLONESHOT for non-persistent events + skip `epoll_ctl(DEL)`** (overnight EXP-004, −18% cascade_chain) | **Plausible-but-wrong — breaks two epoll invariants.** (1) epoll keeps ONE epitem per fd with a combined `EPOLLIN\|EPOLLOUT` mask; `EPOLLONESHOT` disarms the *whole* epitem after one delivery, but `evmap_io` refcounts read/write/close independently — so a read+write (or persistent+non-persistent) pair on the same fd silently drops the un-fired interest (hang/data-loss). (2) "Disarmed" ≠ "removed": skipping `epoll_ctl(DEL)` leaves a live epitem in the kernel set, desyncing libevent's `old_events` from the kernel and leaving a stale registration across `close()`+fd-reuse (breaks the EEXIST→MOD / ENOENT→ADD retry paths). No re-arm path. `evmap_io.oneshot` is per-fd but eligibility (`EV_PERSIST`) is per-event. A correct version needs a single-interest-total gate + `EPOLL_CTL_MOD` re-arm and must KEEP the DEL — do not retry the skip-DEL form. (Maintainer-review mergeability 2/100.) |
+| **Replace `gettime(base,…)` with `evutil_gettime_monotonic_()` in `update_time_cache`** (overnight EXP-008, −2.2% cascade_chain) | **Plausible-but-wrong — drops the wall-clock offset resync.** On its fall-through path `gettime()` also refreshes `base->tv_clock_diff` / `last_updated_clock_diff` (event.c ~433-439), the monotonic→wall-clock offset, on effectively every call. Bypassing it leaves `tv_clock_diff` stale, silently corrupting `event_base_gettimeofday_cached()`, the `EV_TIMEOUT` remap in `event_pending()`, and `event_base_dump_events()` after an NTP step / manual clock set. Any direct-monotonic-read variant MUST replicate the clock-diff resync. (Maintainer-review mergeability 25/100.) |
 
 > Heed `ffc-agent-workspace`'s hard-won lessons that transfer here:
 > `__attribute__((hot/cold))` and `noinline` annotations repeatedly **regressed** there
