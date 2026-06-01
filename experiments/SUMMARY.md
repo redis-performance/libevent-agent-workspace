@@ -5,7 +5,7 @@ Single source of truth for experiment status. Keep in sync with the README count
 | Status | Count |
 |--------|-------|
 | Accepted | 1 |
-| Rejected | 5 |
+| Rejected | 6 |
 | Parked | 0 |
 | In Progress | 0 |
 
@@ -36,6 +36,11 @@ Single source of truth for experiment status. Keep in sync with the README count
 - **EXP-006** (2026-06-01): Drop `ioctl(FIONREAD)` before `evbuffer_read` (Tier 2c) — 0% on
   cascade benchmarks. Cascade benchmarks use raw `recv`/`send` and never call `evbuffer_read`.
   Tier 2 is inapplicable to the current bench suite; requires `bench_http` to validate.
+- **EXP-007** (2026-06-01): `#pragma GCC optimize("O3")` on `event_process_active_single_queue`
+  + `event_process_active` (Tier 4a) — **REGRESSION**: cascade_bench +17% (106→124 µs),
+  cascade_chain +3% (154→159 µs). O3 bloated the dispatch path and thrashed L1 icache.
+  Confirms: compiler optimize/hot/cold pragmas on dispatch code consistently regress
+  icache-sensitive loops.
 
 ## Parked
 

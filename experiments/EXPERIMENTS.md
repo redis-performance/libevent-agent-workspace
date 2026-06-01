@@ -232,3 +232,30 @@ in userspace. Future gains require either: (a) eliminating mandatory syscalls (n
 **Files**: `experiments/EXP-006/bench-results/20260601-032616-*.txt`  
 **Known Non-Starter added**: see `.claude/program.md`
 
+
+---
+
+## EXP-007 — 2026-06-01 — `#pragma GCC optimize("O3")` on dispatch hot path — REJECTED
+
+**Technique (Tier 4a)**: Apply `#pragma GCC push_options` / `#pragma GCC optimize("O3")` / `#pragma GCC pop_options` around `event_process_active_single_queue` and `event_process_active` in `event.c`. The default build uses `-O2` (`RelWithDebInfo`); O3 enables more aggressive inlining, loop unrolling, and register allocation for these two hot functions without touching the rest of the build.
+
+**Hypothesis**: Compiling `event_process_active_single_queue` and `event_process_active` with `-O3` instead of `-O2` inlines hot helpers (`event_queue_remove_active`, `event_callback_to_event`) into the dispatch loop, reducing per-callback overhead for the 100-event cascade workloads by ≥ 2µs per run_once (≥ 2%).
+
+**Result**: REJECTED — both workloads regressed.
+
+| Workload | EXP-006 µs (p50) | EXP-007 µs (p50) | Δ% |
+|----------|------------------|------------------|----|
+| cascade_bench | 106 | 124 | **+17% REGRESSION** |
+| cascade_chain | 154 | 159 | +3.2% regression (within noise, but wrong direction) |
+
+cascade_bench regressed from 106 µs to 124 µs (+17%). cascade_chain regressed from 154 µs to 159 µs (+3%). Both workloads moved in the wrong direction.
+
+**Root cause of regression**: The O3 pragma caused the compiler to aggressively inline and unroll the bodies of `event_queue_remove_active`, `event_del_nolock_`, and related helpers into the dispatch loop. This bloated the function size substantially (O3's inlining threshold is much higher than O2's), thrashing the L1 instruction cache during the 100-iteration tight dispatch loop in cascade_bench. The CPU's icache is shared between the dispatch loop and the callback overhead — enlarging the dispatch functions caused cache-line evictions on every iteration.
+
+cascade_bench suffered more (+17%) because its EV_PERSIST path has shorter callbacks (just recv+send) and the loop iterates 100 times per run_once — the icache pressure compounds over more iterations. cascade_chain has a similar iteration count but each iteration also includes event_del_nolock_ and min_heap overhead, which partially masks the icache regression.
+
+**Key learning**: Confirms the `program.md` warning about compiler annotation disruption (icache/register-allocation disruption from `hot/cold/noinline/optimize` attributes). The event dispatch path is icache-sensitive: the O2 inlining thresholds are well-calibrated for this workload. Applying O3 to any event dispatch function (`event_base_loop`, `event_process_active*`, `event_del_nolock_`) is counterproductive. Do NOT attempt O3 pragmas on dispatch code.
+
+**Correctness**: PASS (370/370 regress tests). Reverted after reject.
+**Files**: `experiments/EXP-007/bench-results/20260601-034411-*.txt`
+**Known Non-Starter added**: see `.claude/program.md`
