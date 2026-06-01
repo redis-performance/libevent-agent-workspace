@@ -5,7 +5,7 @@ Single source of truth for experiment status. Keep in sync with the README count
 | Status | Count |
 |--------|-------|
 | Accepted | 1 |
-| Rejected | 3 |
+| Rejected | 4 |
 | Parked | 0 |
 | In Progress | 0 |
 
@@ -24,6 +24,7 @@ Single source of truth for experiment status. Keep in sync with the README count
 | EXP-001 | 2026-06-01 | EVBUFFER_MAX_READ_DEFAULT 4096→16384 | cascade_bench -1.4%, cascade_chain -0.4% (both noise) | Cascade benchmarks do not use evbuffer_read; Tier 2 changes have zero effect on these workloads |
 | EXP-002 | 2026-06-01 | Enable epoll changelist by default (Tier 3a) | cascade_bench +0.7%, cascade_chain -0.7% (both noise) | Changelist userspace overhead (fdinfo lookup, array management) cancels the 1 saved epoll_ctl syscall per cascade step |
 | EXP-004 | 2026-06-01 | Zero-timeout fast path + changelist n_changes guard in epoll_dispatch (Tier 5a) | cascade_bench +0.7%, cascade_chain +0.4% (both noise) | Function call savings (~2 µs) invisible vs. 7 µs stddev; syscalls dominate, not userspace per-dispatch overhead |
+| EXP-005 | 2026-06-01 | EPOLLONESHOT for non-persistent events to skip epoll_ctl(DEL) (Tier 3/5) | Correctness fail | multiple_events_for_same_fd deadlock: EPOLLONESHOT fires and disables fd when first event fires, stranding other events on same fd; evmap only calls backend ADD for 0→1 transition |
 
 ## Parked
 

@@ -411,3 +411,76 @@ Skipped — `perf` not available on this kernel.
 2. The cascade benchmark is dominated by 3 syscalls per step (epoll_wait + recv + send). Userspace overhead is ~10–20% of total time, and individual function calls within that are not separately measurable without perf.
 3. To find 2%+ improvements without perf, changes must target syscall elimination (saves ~0.2–0.5 µs per call) or fundamental algorithm changes (fewer dispatch iterations), not per-call overhead reduction.
 4. Techniques that save < 1 function call equivalent per step (at the 100-step cascade scale) will not reach the 2% threshold. Only opportunities that affect O(1) overhead per run_once or eliminate a syscall are worth pursuing.
+
+---
+
+## EXP-005 — 2026-06-01 — EPOLLONESHOT for non-persistent events to skip epoll_ctl(DEL) (Tier 3/5 hybrid)
+
+## Status: REJECTED
+
+---
+
+## Selection Phase
+
+Single-agent run (c4a, claude-sonnet-4-6). Technique: use EPOLLONESHOT for non-persistent events to eliminate explicit epoll_ctl(DEL) syscalls.
+
+**Hypothesis**: Non-persistent events in cascade_chain fire exactly once and auto-delete; replacing level-triggered epoll with EPOLLONESHOT allows skipping the explicit epoll_ctl(DEL) syscall (100 calls/run), saving ≥2% on cascade_chain.
+
+**Motivation**: cascade_chain has 100 epoll_ctl(DEL) calls per run (non-persistent events auto-delete after firing). At ~100-300ns per epoll_ctl, eliminating these saves 10-30µs on 275µs → 3.6-10.9% improvement. This is the largest remaining syscall-reduction opportunity.
+
+---
+
+## Implementation Phase
+
+**Changes attempted** (reverted on correctness failure):
+
+1. `evmap.c` — pass `EV_PERSIST` flag from evmap to backend in `evmap_io_add_`:
+   - `evsel->add(..., (ev->ev_events & (EV_ET|EV_PERSIST)) | res, ...)` (was: `& EV_ET` only)
+
+2. `epoll.c` — EPOLLONESHOT implementation:
+   - `epollops.fdinfo_len`: 0 → `sizeof(uint8_t)` (1 byte per fd: 0=none, 1=EPOLLONESHOT armed, 2=fired)
+   - `epoll_apply_one_change`: added `uint32_t extra_events` parameter; adds `events |= extra_events`
+   - `epoll_nochangelist_add`: for non-persistent IO events, adds `EPOLLONESHOT` to epoll events and sets fdinfo=1
+   - `epoll_nochangelist_del`: checks fdinfo; if state==2 (fired), skips epoll_ctl(DEL) and returns 0
+   - `epoll_dispatch`: after epoll_wait returns, uses `evmap_io_get_fdinfo_` to advance fdinfo 1→2 for each fired fd
+
+**Correctness gate result: FAIL**
+
+Two tests failed:
+1. `main/multiple_events_for_same_fd` — TIMEOUT/deadlock (the core correctness bug)
+2. `thread/no_events` — TIMEOUT (cascade of previous failure)
+
+**Root cause**: EPOLLONESHOT fires for the first non-persistent event on a fd, auto-disabling it in the kernel. If a second event (persistent or not) is also registered on the same fd via evmap_io_add_ with nread going from 0→1 (for the first event) and 1→2 (no backend ADD call for the second), the fd remains EPOLLONESHOT-armed. When EPOLLONESHOT fires, the fd is disabled. The second event stays registered in evmap but the fd is disabled in epoll and never fires again — causing a deadlock.
+
+**Why this can't be fixed simply**: libevent's evmap only calls `evsel->add` when the per-fd per-direction count transitions from 0→1. There is no callback when a second event joins an fd that already has EPOLLONESHOT armed. A correct implementation would need either: (1) evmap calling `evsel->add` to MOD from EPOLLONESHOT to level-triggered when a second event arrives, or (2) re-arming the fd when a non-persistent event is deleted and the remaining count is >0. Both require architectural evmap changes.
+
+---
+
+## Step 1: Benchmark
+
+Not reached (correctness gate failed).
+
+---
+
+## Decision
+
+**Status**: REJECT
+
+**Reason**: Correctness gate failure — `main/multiple_events_for_same_fd` times out because EPOLLONESHOT disables the fd in the kernel after the first event fires, stranding other events registered on the same fd. The bug is fundamental to how EPOLLONESHOT interacts with libevent's evmap architecture, which only calls the backend ADD function when fd interest transitions from 0→1.
+
+---
+
+## Token Cost
+
+| Phase | Agent | Model | Notes |
+|-------|-------|-------|-------|
+| single-agent | c4a | claude-sonnet-4-6 | single-turn overnight run |
+
+---
+
+## Lessons
+
+1. EPOLLONESHOT cannot be safely used for non-persistent events in libevent without evmap-level changes. The evmap architecture only calls the backend ADD for the first event on a fd; any subsequent events share the same epoll registration. If EPOLLONESHOT fires, subsequent events are stranded.
+2. The `multiple_events_for_same_fd` regress test is the canary for this class of bug. It tests exactly the mixed persistent/non-persistent case on a shared fd.
+3. The remaining syscall reduction opportunity for cascade_chain (100 epoll_ctl DEL calls/run) requires either: (a) EPOLLONESHOT with deeper evmap integration, (b) fd-level state tracking to detect "last event on fd", or (c) accepting that the benchmark workload is structurally limited by the cascade architecture.
+4. Per-syscall cost: timerfd_settime ~30ns (EXP-003); epoll_ctl(DEL) estimated ~100-300ns. The DEL savings would be 3-10% on cascade_chain if correctly implemented.
