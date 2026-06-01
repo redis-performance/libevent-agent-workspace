@@ -6,3 +6,4 @@ EXP-004	select+implement+verify+bench	claude	claude-sonnet-4-6	~80000	~12000	~0.
 EXP-005	select+implement+verify+bench	claude	claude-sonnet-4-6	~90000	~10000	~0.36	20260601	gettime cache-warming for event_add timeout path - REJECTED below noise floor
 EXP-009	select+implement+verify+bench	claude	claude-sonnet-4-6	~85000	~9000	~0.34	20260601	Fast path evmap_io_del_ ONESHOT single-reader - REJECTED below noise floor
 EXP-011	select+implement+verify	claude	claude-sonnet-4-6	~55000	~7000	~0.22	20260601	EPOLLET instead of EPOLLONESHOT for non-persist events - REJECTED correctness failure
+EXP-012	select+implement+verify+bench	claude	claude-sonnet-4-6	~95000	~11000	~0.38	20260601	Tier 6a single-threaded fast path (with_lock cache) - REJECTED below noise floor

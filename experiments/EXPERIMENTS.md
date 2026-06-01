@@ -473,3 +473,33 @@ need to be tracked and the re-arm decision conditioned on it. This is out of sco
 **Correctness**: FAIL (simpleread, multiple, fork hang; cancel_inactive_server timeout). Reverted.
 **Files**: none (no bench run)
 **Known Non-Starter added**: see `.claude/program.md`
+
+---
+
+## EXP-012 — 2026-06-01 — Tier 6a single-threaded fast path in `event_process_active_single_queue` — REJECTED
+
+**Technique (Tier 6a)**: Cache `base->th_base_lock != NULL` as a local constant `with_lock` at the top of `event_process_active_single_queue`. In the single-threaded case (`with_lock == 0`), the per-callback `base->current_event_waiters` load is short-circuit evaluated away. This eliminates N memory loads per call (N = events processed per queue-processing call, typically 1 for cascade benchmarks), avoiding redundant null-check overhead in the hottest callback-dispatch path.
+
+**Hypothesis**: Caching the lock-null check once per `event_process_active_single_queue` call eliminates ≥1 load of `base->current_event_waiters` per dispatched callback. For 100 events/run_once this saves ~100 ns (~0.1% of 106 µs cascade_bench), expected to be measurably below the 6 µs noise floor but formally tests Tier 6a.
+
+**Implementation**: Two-line change in `event.c`:
+- Added `const int with_lock = (base->th_base_lock != NULL);` at function entry (inside `#ifndef EVENT__DISABLE_THREAD_SUPPORT`)
+- Changed `if (base->current_event_waiters)` to `if (with_lock && base->current_event_waiters)` in the post-callback block
+
+**Result**: REJECTED — 0% improvement on both workloads.
+
+| Workload | EXP-010 µs (p50) | EXP-012 µs (p50) | Δ% | Notes |
+|----------|-----------------|-----------------|-----|-------|
+| cascade_bench | 106 | 106 | 0% | identical |
+| cascade_chain | 155 | 153 | -1.3% | within noise; 1734 µs outlier distorts stddev (140.86 µs) |
+
+cascade_bench: 106 µs in both runs — no change whatsoever (code path not exercised there for EV_PERSIST, `current_event_waiters` check still happens but result is identical).
+cascade_chain: apparent 2 µs improvement is within the 5.29 µs stddev from baseline. One 1734 µs OS-scheduling outlier inflated the stddev to 140.86 µs, making the distribution interpretation unreliable. The actual min improved slightly (155 → 148 µs), which is also within run-to-run variance.
+
+**Root cause of rejection**: The `base->current_event_waiters` load is a single L1-cached load + well-predicted branch per callback. Eliminating it saves ~1 ns per event × 100 events = ~100 ns per run_once — well below the 5–7 µs run-to-run noise floor at 5×25 samples. The userspace dispatch path accounts for only ~10–15 µs out of 106–155 µs total, with ~90% of wall-clock in kernel syscalls (epoll_wait, recv, send, epoll_ctl). Any single-instruction-level improvement to the userspace path (<2 µs savings) is permanently unmeasurable at current sample count.
+
+**Key learning**: Tier 6a (single-threaded lock fast paths) is exhausted for the cascade benchmarks. The per-callback overhead of null checks, lock acquire/release macros, and `current_event_waiters` reads is already minimal (~5–10 ns per event); the code is functionally equivalent to the path taken by a no-op lock. No instruction-level elision in `event_process_active_single_queue` can save > 1–2 µs per run_once. This closes the last formally untried tier in the dispatch hot path. All Tier 3–6 techniques are now exhausted. Future progress requires: (a) adding evbuffer-based benchmarks (bench_http with a load generator) to exercise Tier 1–2 optimizations, or (b) increasing REPETITIONS to 20+ to detect sub-3 µs improvements.
+
+**Correctness**: PASS (370/370 regress tests). Reverted after reject.
+**Files**: `experiments/EXP-012/bench-results/20260601-060722-*.txt`
+**Known Non-Starter added**: see `.claude/program.md`

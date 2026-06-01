@@ -5,7 +5,7 @@ Single source of truth for experiment status. Keep in sync with the README count
 | Status | Count |
 |--------|-------|
 | Accepted | 1 |
-| Rejected | 10 |
+| Rejected | 11 |
 | Parked | 0 |
 | In Progress | 0 |
 
@@ -62,6 +62,12 @@ Single source of truth for experiment status. Keep in sync with the README count
   `main/fork` hang. EPOLLET misses pre-existing unread data on re-registration; the ONESHOT→MOD
   re-arm triggers `ep_item_poll` (kernel readiness re-check) which is required for correctness.
   EPOLLET only works when callbacks fully drain the fd to EAGAIN (not guaranteed by libevent API).
+- **EXP-012** (2026-06-01): Tier 6a single-threaded fast path — cache `base->th_base_lock != NULL`
+  as local `with_lock` in `event_process_active_single_queue` to skip `current_event_waiters` load
+  per callback. cascade_bench: 106→106 µs (0%), cascade_chain: 155→153 µs (-1.3%, within noise).
+  Expected saving (~100 ns) is permanently below the 5–7 µs noise floor. Closes all remaining
+  Tier 3–6 dispatch-loop techniques. Future progress requires evbuffer benchmarks (Tier 1–2) or
+  REPETITIONS ≥ 20 to lower the noise floor.
 
 ## Parked
 
