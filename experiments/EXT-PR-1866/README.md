@@ -118,3 +118,31 @@ PR #1866). Closes the documented limitation.
   dropping the timeout (generic `adj_timeouts` can't see the out-of-epoll `ev_read`) — was a
   genuine hole I'd under-weighted as a "doc footnote"; now fixed + regression-guarded. The two
   style nits (merge the duplicate `if (trigger_user)`; comment the deferred arm) were folded in.
+
+### Improvement #3 ATTEMPTED: zero-copy multishot recv (profile-driven)
+
+**Profile first** (c4, software `task-clock`; GCP VMs have no HW PMU): at 64 KiB × 128p the
+`--uring` path is **copy-bound** — `_copy_to_iter` 17% + `_copy_from_iter` 12% (kernel socket
+copies, inherent to loopback) + **libc memcpy 17%** (the userspace `evbuffer_add()` copy of the
+provided buffer) + ~10% memcg/page-zero. The one addressable userspace lever is the recv copy.
+
+**Change** (branch `io-uring-zerocopy-recv`, `fdefb9dd`): reference the provided buffer via
+`evbuffer_add_reference()` (released to the ring by a cleanup cb on chain free) instead of copying.
+**Measured: 64 KiB ×64p 2702→3770 (+40%), ×128p 3048→3492 (+15%)**, 1 KiB unchanged. io_uring
+regress green, full regress 377/377, ASAN clean.
+
+**7-maintainer review: GO-WITH-FIXES, 45/100, 2/7 green — NOT mergeable as-is.** Two real blockers
+(the review earned its keep):
+1. **Teardown UAF** — a referenced provided buffer is in an *app-owned* evbuffer that can outlive
+   `event_base_free()`; the cleanup then dereferences the freed `buf_relctx`/ring/base. The
+   377/377 + ASAN-clean result proved nothing because every test frees bufferevents before the base
+   and drains promptly. A genuine lifecycle bug I missed.
+2. **Shared-pool fairness** — zero-copy unconditionally pins the shared 128-buffer pool; one slow
+   consumer starves multishot for all connections. The +40%→+15% (64p→128p) drop *is* that pressure.
+The panel also correctly **refuted** a (non-)bug three lenses raised (per-bid slot reuse is safe —
+the kernel won't re-deliver a bid until released).
+
+**To make it mergeable**: (a) a teardown-safe release context (refcount that survives the base, or
+force-drain-on-teardown), (b) a copy-fallback under watermark / low free-buffer count to bound the
+pool, (c) regress tests for evbuffer-outlives-base (ASAN) and pool exhaustion. The win is real and
+wanted; the path is clear. Scoped as the next step.
