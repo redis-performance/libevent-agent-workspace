@@ -322,3 +322,92 @@ Committed to libevent submodule: `aa7a4df5`
    Document in Known Non-Starters for TSAN, or add a workspace note.
 4. Conservative guard (only skip disarmed→disarmed) is safer than full caching: avoids
    potential correctness issues with periodic timers that happen to have the same duration.
+
+---
+
+## EXP-004 — 2026-06-01 — Zero-timeout fast path + changelist n_changes guard in epoll_dispatch (Tier 5a)
+
+## Status: REJECTED
+
+---
+
+## Selection Phase
+
+Single-agent run (c4a, claude-sonnet-4-6). Technique chosen from Tier 5a in program.md.
+
+**Hypothesis**: `epoll_dispatch` calls `evutil_tv_to_msec_()` (an external, non-inline function with overflow checks, multiplication, and division) even when `tv = {0,0}` (EVLOOP_NONBLOCK path, always returns 0), and unconditionally calls `epoll_apply_changes()` and `event_changelist_remove_all_()` even when the changelist is empty (`n_changes = 0`, always the case for the nochangelist backend). Adding a `tv_sec==0 && tv_usec==0` short-circuit to set `timeout=0` directly, and guarding the two changelist calls behind `if (base->changelist.n_changes)`, eliminates ~4–5 function calls per cascade_bench dispatch step and improves throughput by ≥2%.
+
+**Background**: For both cascade benchmarks, `base->evsel` is `epollops` (nochangelist backend): adds/deletes go directly to `epoll_ctl` without using the changelist, so `n_changes` is always 0. For cascade_bench (EVLOOP_NONBLOCK), `tv = {0,0}` every dispatch. Both checks should be near-zero-cost to add.
+
+---
+
+## Implementation Phase
+
+**Change**: `libevent/epoll.c` — two edits to `epoll_dispatch`:
+
+1. **Zero-timeout fast path**: Replace `evutil_tv_to_msec_(tv)` with a guarded check:
+```c
+if (tv->tv_sec == 0 && tv->tv_usec == 0) {
+    timeout = 0;
+} else {
+    timeout = evutil_tv_to_msec_(tv);
+    if (timeout < 0 || timeout > MAX_EPOLL_TIMEOUT_MSEC)
+        timeout = MAX_EPOLL_TIMEOUT_MSEC;
+}
+```
+
+2. **Changelist n_changes guard**: Wrap both changelist calls:
+```c
+if (base->changelist.n_changes) {
+    epoll_apply_changes(base);
+    event_changelist_remove_all_(&base->changelist, base);
+}
+```
+
+Correctness: PASS (light gate — 370 tests ok, 33 skipped)
+
+---
+
+## Step 1: Benchmark (winner vs baseline)
+
+Previous accepted state (EXP-003): `experiments/EXP-003/bench-results/20260601-013418-....txt`
+EXP-004: `experiments/EXP-004/bench-results/20260601-015940-....txt`
+
+| Workload | Before (µs) | After (µs) | Δ% |
+|----------|------------|-----------|-----|
+| cascade_bench (-n 100 -a 1 -w 100) | 141 | 142 | +0.7% |
+| cascade_chain (-n 100) | 275 | 276 | +0.4% |
+
+Noise bands: cascade_bench stddev ≈ 7.19 µs; cascade_chain stddev ≈ 9.00 µs.
+Both deltas are within noise (< 0.2 standard errors of the median).
+
+---
+
+## Step 2: Profile
+
+Skipped — `perf` not available on this kernel.
+
+---
+
+## Decision
+
+**Status**: REJECT
+
+**Reason**: Neither workload improved: cascade_bench regressed +0.7% and cascade_chain +0.4% (both within measurement noise). The changelist checks and `evutil_tv_to_msec_` function call are not bottlenecks for these workloads — the cascade benchmark latency is dominated by socket I/O syscalls (epoll_wait, recv, send), not by the surrounding userspace overhead. Eliminating 2–3 function calls per dispatch step at ~10–20 ns each saves ~1–2 µs total, which is invisible against a 141 µs run with 7 µs stddev.
+
+---
+
+## Token Cost
+
+| Phase | Agent | Model | Notes |
+|-------|-------|-------|-------|
+| single-agent | c4a | claude-sonnet-4-6 | single-turn overnight run |
+
+---
+
+## Lessons
+
+1. Function call overhead per dispatch (~10–20 ns each) is not measurable at this workload scale (100 cascade steps × ~1.4 µs/step). The stddev of ~7 µs dwarfs the expected savings of ~2 µs.
+2. The cascade benchmark is dominated by 3 syscalls per step (epoll_wait + recv + send). Userspace overhead is ~10–20% of total time, and individual function calls within that are not separately measurable without perf.
+3. To find 2%+ improvements without perf, changes must target syscall elimination (saves ~0.2–0.5 µs per call) or fundamental algorithm changes (fewer dispatch iterations), not per-call overhead reduction.
+4. Techniques that save < 1 function call equivalent per step (at the 100-step cascade scale) will not reach the 2% threshold. Only opportunities that affect O(1) overhead per run_once or eliminate a syscall are worth pursuing.
