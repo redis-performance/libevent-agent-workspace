@@ -358,3 +358,48 @@ for userspace-only dispatch improvements.
 **Correctness**: PASS (370/370 regress tests). Reverted after reject.
 **Files**: `experiments/EXP-009/bench-results/20260601-043124-*.txt`
 **Known Non-Starter added**: see `.claude/program.md`
+
+---
+
+## EXP-010 — 2026-06-01 — Increase `INITIAL_NEVENT` from 32 to 64 in `epoll.c` — REJECTED
+
+**Technique (Tier 5a)**: The initial epoll event-array size (`INITIAL_NEVENT = 32`) limits the
+number of events returned per `epoll_wait` call before the array must be reallocated (doubled
+via `mm_realloc`). Increasing from 32 to 64 avoids this reallocation for workloads that
+simultaneously have 33–64 events ready, reducing `mm_realloc` overhead and memory allocation
+fragmentation on first dispatch.
+
+**Hypothesis**: For cascade_bench and cascade_chain (serial 1-event-per-dispatch workloads),
+the change is expected to have zero effect because `epoll_wait` returns at most 1 event per call
+and the initial array size is never the bottleneck. The experiment validates this expectation
+and formally documents the INITIAL_NEVENT tuning as inapplicable to serial event workloads.
+
+**Implementation**: One-line change in `epoll.c` — `#define INITIAL_NEVENT 32` → `64`.
+
+**Result**: REJECTED — zero measurable effect on both workloads.
+
+| Workload | EXP-009 µs (p50) | EXP-010 µs (p50) | Δ% | Notes |
+|----------|-----------------|-----------------|-----|-------|
+| cascade_bench | 107 | 106 | -0.9% | Within noise (stddev 7.07 µs) |
+| cascade_chain | 154 | 155 | +0.6% | Within noise (stddev 5.29 µs) |
+
+Both deltas are within one standard deviation of run-to-run noise. The unaffected control
+(cascade_bench) moved by the same magnitude as the treatment (cascade_chain), confirming all
+variation is machine load noise.
+
+**Root cause of rejection**: The cascade benchmarks process exactly 1 event per `epoll_wait`
+call (serial workload: each callback writes to the NEXT pipe, triggering the next event
+sequentially). The `epoll_wait` result array never fills beyond 1 entry — the initial size
+(32 or 64) is irrelevant because the auto-grow path (`res == nevents`) is never triggered.
+`INITIAL_NEVENT` only matters when N > INITIAL_NEVENT events become ready simultaneously
+(parallel workloads), which requires a different benchmark (e.g., `bench -n 100 -a 100`).
+
+**Key learning**: `INITIAL_NEVENT` tuning only affects workloads where multiple events fire
+simultaneously within a single `epoll_wait`. For serial cascade patterns (events trigger one
+at a time), any value of INITIAL_NEVENT ≥ 1 is equivalent. The auto-grow mechanism (doubling
+when the array fills) already handles parallel workloads gracefully; only the reallocation
+overhead on first batch differs.
+
+**Correctness**: PASS (370/370 regress tests). Reverted after reject.
+**Files**: `experiments/EXP-010/bench-results/20260601-052226-*.txt`
+**Known Non-Starter added**: see `.claude/program.md`

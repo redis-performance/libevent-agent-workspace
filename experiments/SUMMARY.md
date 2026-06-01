@@ -5,7 +5,7 @@ Single source of truth for experiment status. Keep in sync with the README count
 | Status | Count |
 |--------|-------|
 | Accepted | 1 |
-| Rejected | 8 |
+| Rejected | 9 |
 | Parked | 0 |
 | In Progress | 0 |
 
@@ -52,6 +52,11 @@ Single source of truth for experiment status. Keep in sync with the README count
   REJECTED. cascade_chain 172→154 µs (-10.5%), but unaffected cascade_bench also improved
   124→107 µs (-13.7%) — confirms all improvement is machine load noise. Expected code saving
   (~15 instructions × 100 events ≈ 1–2 µs) permanently below ~6 µs noise floor.
+- **EXP-010** (2026-06-01): Increase `INITIAL_NEVENT` from 32 to 64 in `epoll.c` (Tier 5a) —
+  REJECTED. cascade_bench: 107→106 µs (-0.9%, noise), cascade_chain: 154→155 µs (+0.6%, noise).
+  Zero effect: cascade benchmarks return 1 event per `epoll_wait` (serial workload), so the
+  event array never fills and the auto-grow path is never triggered. INITIAL_NEVENT only affects
+  parallel workloads where N > INITIAL_NEVENT events fire simultaneously.
 
 ## Parked
 
