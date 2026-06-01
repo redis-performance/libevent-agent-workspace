@@ -204,3 +204,121 @@ fd churn (e.g., 1000+ fds, many simultaneous DEL+ADD cycles per dispatch).
    "epoll (with changelist)" as a special case). Implementation was correct and clean.
 4. Future epoll_ctl churn reduction must reduce churn more aggressively (e.g., avoid the DEL
    entirely for non-persistent events when the fd is known to be immediately re-added).
+
+---
+
+## EXP-003 — 2026-06-01 — Skip redundant timerfd_settime when already disarmed (Tier 5a)
+
+## Status: ACCEPTED
+
+---
+
+## Selection Phase
+
+Single-agent run (c4a, claude-sonnet-4-6). Technique chosen from Tier 5a in program.md.
+
+**Hypothesis**: The cascade benchmark registers no timer events, so `timerfd_settime({0,0})`
+(disarm) is called on every `epoll_dispatch` iteration even though the timer is already
+disarmed — one wasted syscall per loop. Caching the last-set `itimerspec` and skipping the
+call when transitioning from disarmed to disarmed will eliminate this syscall from the hot
+path and reduce cascade_bench µs by ≥2%.
+
+**Background**: The libevent codebase contained an explicit TODO comment at the
+`timerfd_settime` call site: *"we could avoid unnecessary syscalls here by only calling
+timerfd_settime when the top timeout changes, or when we're called with a different timeval."*
+This experiment implements the most conservative form of that optimization.
+
+---
+
+## Implementation Phase
+
+**Change**: `libevent/epoll.c` — two edits:
+
+1. Add `struct itimerspec last_timerfd_set;` to `struct epollop` (inside `#ifdef USING_TIMERFD`)
+2. In `epoll_dispatch`, replace unconditional `timerfd_settime` with a guarded call that skips
+   the syscall when both the desired state and the cached state are `{0,0}` (disarmed):
+
+```c
+/* Skip timerfd_settime when the disarmed state is already set;
+ * avoids a syscall per dispatch on workloads with no timer events. */
+if (is.it_value.tv_sec != 0 || is.it_value.tv_nsec != 0 ||
+    epollop->last_timerfd_set.it_value.tv_sec != 0 ||
+    epollop->last_timerfd_set.it_value.tv_nsec != 0) {
+    if (timerfd_settime(epollop->timerfd, 0, &is, NULL) < 0) {
+        event_warn("timerfd_settime");
+    }
+    epollop->last_timerfd_set = is;
+}
+```
+
+The guard is intentionally conservative: only skips when the timer is (and should remain)
+disarmed. Any active timer (non-zero `is.it_value`) still calls `timerfd_settime`.
+`mm_calloc` zero-initializes `last_timerfd_set`, matching the timerfd's initial disarmed state.
+
+Correctness: PASS (light gate — 370 tests ok, 33 skipped; ASAN clean)
+
+Note on TSAN: `FATAL: ThreadSanitizer: unexpected memory mapping` was observed both before and
+after the change (verified by stashing the patch and re-running). This is a pre-existing
+kernel 6.14.0-1014-gcp / GCP address-space incompatibility, not caused by this change.
+The new field `last_timerfd_set` is accessed only in `epoll_dispatch`, which is called under
+the base lock — there is no threading concern.
+
+---
+
+## Step 1: Benchmark (winner vs baseline)
+
+Baseline: `experiments/baseline/bench-results/20260531-235235-...-BASELINE.txt`
+EXP-003:  `experiments/EXP-003/bench-results/20260601-013418-....txt`
+
+| Workload | Before (µs) | After (µs) | Δ% |
+|----------|------------|-----------|-----|
+| cascade_bench (-n 100 -a 1 -w 100) | 144 | 141 | -2.1% |
+| cascade_chain (-n 100) | 278 | 275 | -1.1% |
+
+cascade_bench: median=141µs min=139µs p99=167µs mean=145.61µs±7.05 (n=125)
+cascade_chain: median=275µs min=265µs p99=681µs mean=296.81µs±170.42 (n=125)
+
+cascade_bench meets the ≥2% accept threshold. cascade_chain also improved (no regression).
+
+---
+
+## Step 2: Profile
+
+Skipped — `perf` not available on this kernel (linux-tools-6.14.0-1014-gcp not installed).
+
+---
+
+## Decision
+
+**Status**: ACCEPT
+
+**Reason**: cascade_bench improved from 144→141µs (-2.1%), exceeding the ≥2% threshold.
+cascade_chain also improved from 278→275µs (-1.1%). No regressions. The change eliminates
+the `timerfd_settime` syscall from the `epoll_dispatch` hot path for workloads with no timer
+events — exactly the cascade benchmark workload. ASAN is clean; TSAN failure is pre-existing
+infrastructure (kernel incompatibility), verified by testing the unmodified code.
+
+Committed to libevent submodule: `aa7a4df5`
+
+---
+
+## Token Cost
+
+| Phase | Agent | Model | Notes |
+|-------|-------|-------|-------|
+| single-agent | c4a | claude-sonnet-4-6 | single-turn overnight run |
+
+---
+
+## Lessons
+
+1. The timerfd path in `epoll_dispatch` calls `timerfd_settime` unconditionally every
+   dispatch iteration. When there are no timer events (cascade bench case), this is a
+   wasted syscall that can be elided with a simple cached-value check.
+2. The optimization was explicitly called out as a TODO in the source — look for TODO
+   comments in hot paths as a source of low-hanging fruit.
+3. TSAN (`FATAL: ThreadSanitizer: unexpected memory mapping`) is broken on kernel
+   6.14.0-1014-gcp due to address space incompatibility. This is infrastructure, not code.
+   Document in Known Non-Starters for TSAN, or add a workspace note.
+4. Conservative guard (only skip disarmed→disarmed) is safer than full caching: avoids
+   potential correctness issues with periodic timers that happen to have the same duration.

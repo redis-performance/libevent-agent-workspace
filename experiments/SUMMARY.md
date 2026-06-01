@@ -4,7 +4,7 @@ Single source of truth for experiment status. Keep in sync with the README count
 
 | Status | Count |
 |--------|-------|
-| Accepted | 0 |
+| Accepted | 1 |
 | Rejected | 2 |
 | Parked | 0 |
 | In Progress | 0 |
@@ -13,7 +13,9 @@ Single source of truth for experiment status. Keep in sync with the README count
 
 ## Accepted (best-known chain)
 
-_None yet. The first accepted experiment advances the `libevent` submodule tip._
+| EXP | Date | Technique | Result | Commit |
+|-----|------|-----------|--------|--------|
+| EXP-003 | 2026-06-01 | Skip redundant timerfd_settime when already disarmed (Tier 5a) | cascade_bench -2.1%, cascade_chain -1.1% | aa7a4df5 |
 
 ## Rejected
 
