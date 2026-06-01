@@ -190,3 +190,45 @@ same dispatch iteration expect identical cached time (`tv1 == tv2 == tv3`), whic
 **Files**: `experiments/EXP-005/bench-results/20260601-025231-*.txt`  
 **Known Non-Starter added**: see `.claude/program.md`
 
+---
+
+## EXP-006 — 2026-06-01 — Drop `ioctl(FIONREAD)` before `evbuffer_read` — REJECTED
+
+**Technique (Tier 2c)**: In `get_n_bytes_readable_on_socket`, replace the Linux
+`ioctl(fd, FIONREAD, &n)` call with an immediate return of `EVBUFFER_MAX_READ_DEFAULT`.
+Since `evbuffer_read` already caps reads at `buf->max_read`, the FIONREAD value is only
+useful when it's smaller than `max_read` (avoids over-allocating for tiny reads). Dropping
+it saves one syscall per `evbuffer_read` call.
+
+**Hypothesis**: Each `evbuffer_read` call currently pays one `ioctl(FIONREAD)` syscall
+(~200 ns) before the `readv`. For evbuffer-based workloads with many small reads, eliminating
+this syscall should reduce per-read overhead by ≥2%.
+
+**Result**: 0% improvement on both workloads (INAPPLICABLE — cascade benchmarks bypass evbuffer).
+
+| Workload | EXP-004/005 µs (p50) | EXP-006 µs (p50) | Δ% |
+|----------|---------------------|------------------|----|
+| cascade_bench | 106 | 106 | 0% |
+| cascade_chain | 158–166 | 154 | ~−2.5% (machine noise, see below) |
+
+cascade_chain's apparent 154 µs is within normal run-to-run variance (EXP-006 stddev = 5.9 µs;
+EXP-005 saw heavy machine load in its last 50 samples inflating that median). Both `bench` and
+`bench_cascade` use raw `recv`/`send` in callbacks and never call `evbuffer_read`. The FIONREAD
+change is a strict no-op for these workloads.
+
+**Root cause of rejection**: Tier 2 (Socket I/O Batching) is inapplicable to the current
+benchmark suite. `bench` and `bench_cascade` are designed to stress the event-loop dispatch
+path and use raw `recv`/`send`; evbuffer is never exercised. To measure Tier 2 improvements,
+`bench_http` (bufferevent-based HTTP pipeline) would need to be added to `scripts/run-bench.sh`.
+
+**Key learning**: After exhaustive analysis of all Tier 3–5 options, **every remaining
+userspace optimization saves < 3–5 µs** — below the 6–17 µs per-run noise floor at 5×25
+samples. The cascade benchmarks are at a practical optimum for what libevent can control
+in userspace. Future gains require either: (a) eliminating mandatory syscalls (none remain),
+(b) adding evbuffer-based workloads to the benchmark suite, or (c) increasing sample count
+(REPETITIONS=20+) to detect sub-5 µs improvements.
+
+**Correctness**: PASS (370/370 regress tests). Reverted after reject.  
+**Files**: `experiments/EXP-006/bench-results/20260601-032616-*.txt`  
+**Known Non-Starter added**: see `.claude/program.md`
+

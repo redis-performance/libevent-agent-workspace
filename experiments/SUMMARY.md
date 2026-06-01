@@ -5,7 +5,7 @@ Single source of truth for experiment status. Keep in sync with the README count
 | Status | Count |
 |--------|-------|
 | Accepted | 1 |
-| Rejected | 4 |
+| Rejected | 5 |
 | Parked | 0 |
 | In Progress | 0 |
 
@@ -33,6 +33,9 @@ Single source of truth for experiment status. Keep in sync with the README count
   improvement. Expected saving (~1.5 µs from 99 eliminated vDSO clock calls) is below the 8–17 µs
   noise floor. Confirms: userspace savings < ~3–5 µs per run_once are unmeasurable at current
   sample count.
+- **EXP-006** (2026-06-01): Drop `ioctl(FIONREAD)` before `evbuffer_read` (Tier 2c) — 0% on
+  cascade benchmarks. Cascade benchmarks use raw `recv`/`send` and never call `evbuffer_read`.
+  Tier 2 is inapplicable to the current bench suite; requires `bench_http` to validate.
 
 ## Parked
 
