@@ -128,6 +128,7 @@ Document failed experiments here as they are discovered. Starting empty.
 | Technique | Why it didn't work |
 |-----------|--------------------|
 | Lazy epoll_ctl(DEL) deferral in `epoll_nochangelist_del/add` (Tier 3a) | The cascade_bench setup (event_del+event_add) happens **before** `gettimeofday(&ts)` — it is NOT in the timed window. Only the dispatch loop is measured. Saved 100 epoll_ctl calls per setup but 0% wall-clock improvement. cascade_chain setup IS timed but no DEL calls are in the timed window either (cleanup is after `gettimeofday(&te)`). Redirect to dispatch-loop optimizations (Tier 4, 5) or cascade_chain event_add path (100 epoll_ctl ADD calls in timed window). |
+| Skip `timerfd_settime` when tv={0,0} in `epoll_dispatch` (Tier 5a) | **INAPPLICABLE on this system.** `USING_TIMERFD` is only compiled when `!defined(EVENT__HAVE_EPOLL_PWAIT2)` (epoll.c line 84). This system has `EVENT__HAVE_EPOLL_PWAIT2=1`, so the `#ifdef USING_TIMERFD` block is dead code. The hot path uses `epoll_pwait2` + `struct timespec`. Any timeout optimization must target the `epoll_pwait2` path, not the timerfd path. |
 
 > Heed `ffc-agent-workspace`'s hard-won lessons that transfer here:
 > `__attribute__((hot/cold))` and `noinline` annotations repeatedly **regressed** there

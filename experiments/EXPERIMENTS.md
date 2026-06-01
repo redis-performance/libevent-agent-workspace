@@ -35,3 +35,33 @@ syscalls exclusively in untimed code paths.
 **Correctness**: PASS (370/370 regress tests). Reverted after reject.  
 **Files**: `experiments/EXP-001/bench-results/` (5-rep and 15-rep runs), `experiments/EXP-001/EXP-001.md`  
 **Known Non-Starter added**: see `.claude/program.md`
+
+---
+
+## EXP-002 — 2026-06-01 — Skip timerfd_settime on NONBLOCK path — REJECTED
+
+**Technique (Tier 5a)**: When `tv = {0,0}` (EVLOOP_NONBLOCK), skip the `timerfd_settime`
+syscall in `epoll_dispatch`; `epoll_wait(timeout=0)` returns immediately regardless of timerfd state.
+
+**Hypothesis**: Every NONBLOCK dispatch calls `timerfd_settime(fd, 0, {0,0}, NULL)` to disarm
+the timer — a wasted syscall. Eliminating ~101 calls per cascade `run_once` should cut
+cascade_bench median by ≥2%.
+
+**Result**: INAPPLICABLE / no-op. `USING_TIMERFD` is only defined when
+`!defined(EVENT__HAVE_EPOLL_PWAIT2)`. This system has `EVENT__HAVE_EPOLL_PWAIT2 = 1`, so
+the `#ifdef USING_TIMERFD` block is dead code. The hot path uses `epoll_pwait2` with a
+`struct timespec` timeout; no timerfd is involved.
+
+| Workload | Baseline µs (15-rep) | EXP-002 µs (5-rep) | Δ% |
+|----------|---------------------|--------------------|----|
+| cascade_bench | 106 | 123 | +16% (machine noise — no-op change) |
+| cascade_chain | 195 | 195 | 0% |
+
+The cascade_bench "regression" is machine load noise: last-rep raw samples (103-118 µs) are
+consistent with baseline; first 4 reps (121-133 µs) reflect machine load during that run.
+
+**Root cause of rejection**: Technique targets dead code on this platform. No binary diff.
+
+**Correctness**: PASS (370/370 regress tests). Reverted after identifying no-op.  
+**Files**: `experiments/EXP-002/bench-results/`, `experiments/EXP-002/EXP-002.md`  
+**Known Non-Starter added**: see `.claude/program.md`
