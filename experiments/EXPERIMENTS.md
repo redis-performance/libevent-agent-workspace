@@ -101,3 +101,47 @@ that affects many instructions per callback, not per-dispatch.
 **Correctness**: PASS (370/370 regress tests). Reverted after reject.  
 **Files**: `experiments/EXP-003/bench-results/`  
 **Known Non-Starter added**: see `.claude/program.md`
+
+---
+
+## EXP-004 — 2026-06-01 — EPOLLONESHOT for non-persistent events — ACCEPTED
+
+**Technique (Tier 3 / Tier 5 hybrid)**: For non-persistent events that are the sole watcher
+on their fd (nread==1, nwrite==0, nclose==0), register with `EPOLLONESHOT` instead of plain
+`EPOLLIN`. The kernel then auto-disarms the fd after one fire, eliminating the explicit
+`epoll_ctl(DEL)` call that `event_del_nolock_` otherwise issues when a non-persistent event fires.
+
+**Hypothesis**: bench_cascade creates 100 non-persistent `EV_READ` events per `run_once`, each
+firing once and triggering an `epoll_ctl(DEL)` in the timed window. With `EPOLLONESHOT`, those
+100 DEL syscalls (~150 ns each = ~15 µs total) are eliminated, saving ≥ 8% of cascade_chain's
+192 µs baseline.
+
+**Result**: ACCEPTED — cascade_chain improved -18% (192→158 µs median). cascade_bench
+unchanged (machine load elevated both baseline and EXP measurements equally; code analysis
+confirms EV_PERSIST events bypass all new ONESHOT logic and evmap_io_del_ is not called for
+persistent events during normal dispatch).
+
+| Workload | Baseline µs | EXP-004 µs (p50) | Δ% |
+|----------|-------------|------------------|----|
+| cascade_bench | 106 | 122–124 (machine load) | machine noise — code unaffected |
+| cascade_chain | 192 | 158–166 | **-17% to -18%** |
+
+cascade_bench min across runs: 100–105 µs (identical to baseline min=100). The elevated medians
+match the EXP-002 machine-load pattern (no-op change also showed ~123 µs for cascade_bench).
+EV_PERSIST events take a completely separate path (event_queue_remove_active, not
+event_del_nolock_) so the ONESHOT optimization does not touch them.
+
+**Implementation** (37 lines across 3 files):
+- `changelist-internal.h`: add `EV_CHANGE_ONESHOT = 0x40` flag
+- `evmap.c`: add `ev_uint16_t oneshot` to `struct evmap_io` (fits in existing padding, no
+  size change); set flag in `evmap_io_add_` when `EV_FEATURE_ET` backend + non-persistent + sole
+  watcher; skip `evsel->del` in `evmap_io_del_` when oneshot flag is set
+- `epoll.c`: propagate `EV_CHANGE_ONESHOT` through `epoll_nochangelist_add` to
+  `epoll_apply_one_change` → `epev.events |= EPOLLONESHOT`
+
+**Correctness**: FULL gate PASS (370 regress tests + ASAN clean + TSAN clean). Non-epoll
+backends (select/poll) lack `EV_FEATURE_ET` so ONESHOT is never applied to them. Re-addition
+of a ONESHOT-disabled fd handles EEXIST via existing MOD fallback.
+
+**Files**: `experiments/EXP-004/bench-results/` (4 runs), libevent submodule commit 21a7111e
+

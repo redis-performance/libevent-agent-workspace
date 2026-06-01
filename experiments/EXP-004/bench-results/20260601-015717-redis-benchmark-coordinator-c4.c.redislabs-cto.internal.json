@@ -1,0 +1,10 @@
+{
+  "exp": "EXP-004", "host": "redis-benchmark-coordinator-c4.c.redislabs-cto.internal", "timestamp": "20260601-015717",
+  "libevent_commit": "1b7cc9b58d6a5fdd5f33a43168245c2e1f35291f",
+  "cores": "2-5", "repetitions": 5, "warmup": 1,
+  "baseline": false,
+  "workloads": {
+    "cascade_bench": {"cmd": "bench -n 100 -a 1 -w 100", "n": 125, "min_us": 122, "median_us": 124, "p95_us": 139, "p99_us": 205, "max_us": 206, "mean_us": 128.56, "stddev_us": 13.09},
+    "cascade_chain": {"cmd": "bench_cascade -n 100", "n": 125, "min_us": 150, "median_us": 166, "p95_us": 199, "p99_us": 217, "max_us": 226, "mean_us": 171.91, "stddev_us": 17.16}
+  }
+}

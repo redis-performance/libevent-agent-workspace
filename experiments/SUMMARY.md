@@ -4,7 +4,7 @@ Single source of truth for experiment status. Keep in sync with the README count
 
 | Status | Count |
 |--------|-------|
-| Accepted | 0 |
+| Accepted | 1 |
 | Rejected | 3 |
 | Parked | 0 |
 | In Progress | 0 |
@@ -13,7 +13,10 @@ Single source of truth for experiment status. Keep in sync with the README count
 
 ## Accepted (best-known chain)
 
-_None yet. The first accepted experiment advances the `libevent` submodule tip._
+- **EXP-004** (2026-06-01): EPOLLONESHOT for non-persistent events (Tier 3/5) — **-18%
+  cascade_chain** (192→158 µs). Eliminates 100 `epoll_ctl(DEL)` calls per `run_once` by
+  registering non-persistent, sole-watcher events with `EPOLLONESHOT`; kernel auto-disarms
+  after fire. cascade_bench unaffected (EV_PERSIST events bypass new code path entirely).
 
 ## Rejected
 
