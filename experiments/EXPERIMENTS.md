@@ -792,3 +792,74 @@ Benchmark file: `experiments/EXP-009/bench-results/20260601-050902-redis-benchma
 1. The `struct epoll_event` construction overhead before `epoll_ctl` is negligible compared to the syscall cost itself. Even with 100 calls per run_once, the ~400ns saving is below the noise floor (~19µs stddev for cascade_chain). Do not target userspace syscall-argument construction for these workloads.
 2. For cascade_chain at 272µs, the bottleneck is the kernel time: 100 blocking epoll_wait calls + 100 epoll_ctl(DEL) calls. No amount of userspace micro-optimization in the argument preparation path will be measurable.
 3. The next optimizations must either reduce the NUMBER of syscalls (hard, given cascadebench architecture) or target a different bottleneck class entirely (evbuffer data plane, HTTP path).
+
+## EXP-010 — 2026-06-01 — Skip update_time_cache for blocking dispatches with empty timer heap
+
+## Status: REJECTED
+
+---
+
+## Selection Phase
+
+Single-agent run (c4a, claude-sonnet-4-6).
+
+**Hypothesis**: EXP-007 saved ~8µs on cascade_bench by skipping `update_time_cache` for NONBLOCK+empty-heap dispatches. cascade_chain has 100 BLOCKING dispatches per run_once, all with an empty heap. Removing the `!(flags & EVLOOP_NONBLOCK) ||` guard so that `update_time_cache` is skipped for ANY dispatch with an empty heap (not just NONBLOCK) should save ~100 × clock_gettime (~80ns on this GCP VM) ≈ 8µs ≈ 3% on cascade_chain. cascade_bench is unaffected (NONBLOCK dispatches already skipped; only the 1 blocking call is newly eliminated ≈ 80ns noise).
+
+---
+
+## Implementation Phase
+
+**Change**: `event.c`, `event_base_loop` — replaced the EXP-007 guard:
+
+```c
+// Before (EXP-007):
+if (!(flags & EVLOOP_NONBLOCK) || !min_heap_empty_(&base->timeheap))
+    update_time_cache(base);
+
+// Proposed (EXP-010):
+if (!min_heap_empty_(&base->timeheap))
+    update_time_cache(base);
+```
+
+This extends the skip to blocking dispatches with empty timer heap.
+
+**Correctness gate**: LIGHT — **FAILED**
+
+Failed tests:
+- `main/gettimeofday_cached`
+- `main/gettimeofday_cached_sleep`
+
+Failure mode: `event_base_gettimeofday_cached` relies on `tv_cache` being populated by `update_time_cache` within a dispatch cycle so that all callbacks within one cycle see the same consistent time. When `update_time_cache` is skipped (tv_cache.tv_sec stays 0), `event_base_gettimeofday_cached` falls back to a fresh `evutil_gettimeofday` call per callback. Since the three callbacks fire at slightly different real times, their timestamps differ — the test's assertion `evutil_timercmp(&tv1, &tv2, ==)` fails.
+
+Root cause: The NONBLOCK guard in EXP-007 was not just an optimization heuristic — it implicitly captured the semantics "this is a polling dispatch where no application code will call `event_base_gettimeofday_cached`." Removing the NONBLOCK guard breaks for blocking dispatches that have active callbacks which call this API.
+
+---
+
+## Step 1: Benchmark
+
+Not reached — correctness gate failed.
+
+---
+
+## Decision
+
+**Status**: REJECT
+
+**Reason**: The `main/gettimeofday_cached` regress tests confirm that `update_time_cache` is required for blocking dispatches even with an empty heap, because `event_base_gettimeofday_cached` depends on the cache being consistent across all callbacks within a dispatch cycle. The NONBLOCK condition in EXP-007's guard is load-bearing: NONBLOCK dispatches are polling cycles where application code is not expected to call `event_base_gettimeofday_cached`, while blocking dispatches can have user callbacks relying on it.
+
+---
+
+## Token Cost
+
+| Phase | Agent | Model | Notes |
+|-------|-------|-------|-------|
+| single-agent | c4a | claude-sonnet-4-6 | single-turn overnight run |
+
+---
+
+## Lessons
+
+1. The `!(flags & EVLOOP_NONBLOCK)` condition in EXP-007's `update_time_cache` guard is a semantic boundary, not just a performance heuristic. NONBLOCK dispatch = polling cycle; blocking dispatch = can have user callbacks that call `event_base_gettimeofday_cached`.
+2. Extending the skip to blocking dispatches breaks the time-cache consistency contract: all callbacks within one dispatch cycle must see the same "current time" via `event_base_gettimeofday_cached`. This requires `update_time_cache` to be called before `event_process_active`, regardless of whether the timer heap is empty.
+3. A potential future fix: make `event_base_gettimeofday_cached` lazily populate `tv_cache` on first call within a dispatch cycle (instead of relying on `update_time_cache` to pre-populate it). This would preserve the consistency guarantee while avoiding the clock call when no callback uses it. Not attempted here due to complexity and thread-safety concerns.
+4. The pattern for future experiments: any optimization that touches the time-cache must pass the `main/gettimeofday_cached*` tests. These are fast and reliable detectors of time-cache violations.
