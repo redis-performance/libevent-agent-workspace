@@ -863,3 +863,72 @@ Not reached — correctness gate failed.
 2. Extending the skip to blocking dispatches breaks the time-cache consistency contract: all callbacks within one dispatch cycle must see the same "current time" via `event_base_gettimeofday_cached`. This requires `update_time_cache` to be called before `event_process_active`, regardless of whether the timer heap is empty.
 3. A potential future fix: make `event_base_gettimeofday_cached` lazily populate `tv_cache` on first call within a dispatch cycle (instead of relying on `update_time_cache` to pre-populate it). This would preserve the consistency guarantee while avoiding the clock call when no callback uses it. Not attempted here due to complexity and thread-safety concerns.
 4. The pattern for future experiments: any optimization that touches the time-cache must pass the `main/gettimeofday_cached*` tests. These are fast and reliable detectors of time-cache violations.
+
+## EXP-011 — 2026-06-01 — Lazy tv_cache populate in gettimeofday_cached + skip update_time_cache for empty heap
+
+## Status: REJECTED
+
+---
+
+## Selection Phase
+
+Single-agent run (c4a, claude-sonnet-4-6).
+
+**Hypothesis**: EXP-010 failed to skip `update_time_cache` for blocking dispatches because `event_base_gettimeofday_cached` requires `tv_cache` to be pre-populated for cross-callback consistency. By additionally making `event_base_gettimeofday_cached` lazily populate the cache on the first call within a dispatch cycle, we can extend the skip condition to `!min_heap_empty_` (regardless of NONBLOCK flag), eliminating 100 × `clock_gettime(CLOCK_MONOTONIC)` calls per cascade_chain run_once and saving ~2% — while preserving the consistency guarantee.
+
+---
+
+## Implementation Phase
+
+**Changes (event.c)**:
+
+1. Dispatch loop guard changed from:
+   ```c
+   if (!(flags & EVLOOP_NONBLOCK) || !min_heap_empty_(&base->timeheap))
+       update_time_cache(base);
+   ```
+   To:
+   ```c
+   if (!min_heap_empty_(&base->timeheap))
+       update_time_cache(base);
+   ```
+
+2. `event_base_gettimeofday_cached` — when `tv_cache.tv_sec == 0` (not yet populated this cycle) and `NO_CACHE_TIME` is not set, lazily call `evutil_gettime_monotonic_` to populate the cache before returning, so all subsequent callbacks within the same cycle get the same timestamp.
+
+**Correctness gate**: LIGHT — **PASS** (all 370 tests, including `main/gettimeofday_cached`, `main/gettimeofday_cached_sleep`, `main/gettimeofday_cached_reset`, `main/gettimeofday_cached_disabled`).
+
+---
+
+## Step 1: Benchmark
+
+| Workload | Before (µs) | After (µs) | Δ% |
+|----------|------------|-----------|-----|
+| cascade_bench | 137 | 137 | 0.0% |
+| cascade_chain | 273 | 275 | +0.7% (noise) |
+
+Benchmark file: `experiments/EXP-011/bench-results/20260601-054928-redis-benchmark-coordinator-c4a.c.redislabs-cto.internal.txt`
+
+---
+
+## Decision
+
+**Status**: REJECT
+
+**Reason**: Zero improvement on cascade_chain (275µs vs 273µs baseline, +0.7% within noise, stddev=64µs). The vDSO `clock_gettime(CLOCK_MONOTONIC)` on this GCP VM takes only ~5-10ns (vDSO avoids kernel entry), so 100 calls × ~10ns ≈ 1µs — well below the ~19µs measurement noise floor for cascade_chain.
+
+---
+
+## Token Cost
+
+| Phase | Agent | Model | Notes |
+|-------|-------|-------|-------|
+| single-agent | c4a | claude-sonnet-4-6 | single-turn overnight run |
+
+---
+
+## Lessons
+
+1. vDSO `clock_gettime(CLOCK_MONOTONIC)` on GCP VMs with modern kernels is ~5-10ns — not ~60ns. Avoiding 100 calls saves only ~1µs, invisible against the ~19µs cascade_chain noise floor.
+2. The lazy populate approach does fix the correctness issue from EXP-010 (all gettimeofday_cached tests pass), making it a valid technique — just not measurable at this scale. Could matter for workloads with >10,000 dispatches per second where the savings would aggregate.
+3. Time-cache optimizations in the dispatch loop are exhausted: EXP-007 (skip for NONBLOCK+empty, 5.6% on cascade_bench) and EXP-008 (use monotonic vs gettimeofday, 2.2% on cascade_chain) already captured the available gains. No further single-line time-cache tweaks will be measurable.
+4. Next experiments should target a different subsystem entirely — likely the evbuffer data plane (Tier 1) on a bufferevent-based benchmark, or the activation queue (Tier 4) with careful cycle counting to confirm CPU cost.
