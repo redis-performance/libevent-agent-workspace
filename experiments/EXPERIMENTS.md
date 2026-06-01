@@ -720,3 +720,75 @@ Benchmark file: `experiments/EXP-008/bench-results/20260601-042646-redis-benchma
 2. `update_time_cache` is the main caller of `gettime()` in the dispatch loop. Bypassing the `gettimeofday` sync there saves significant work for workloads with many dispatch iterations (cascade_chain: 100 iterations × gettimeofday_cost).
 3. `tv_clock_diff` accuracy for `event_base_gettimeofday_cached` and `event_pending` is maintained by `event_add_nolock_`'s `gettime()` call (which still does full sync). The timer tests confirmed this: `evtimer_add` → `gettime()` → sync; `evtimer_pending` → uses fresh `tv_clock_diff`.
 4. When cascade_bench is already optimized (EXP-007 skips update_time_cache entirely), the next optimization target must focus on cascade_chain — which is dominated by 100 blocking epoll_wait calls, 100 epoll_ctl(ADD) in setup, 100 epoll_ctl(DEL) post-fire, and repeated time-related calls.
+
+---
+
+## EXP-009 — 2026-06-01 — Pass NULL epev to epoll_ctl(EPOLL_CTL_DEL) to skip struct construction
+
+## Status: REJECTED
+
+---
+
+## Selection Phase
+
+Single-agent run (c4a, claude-sonnet-4-6).
+
+**Hypothesis**: For `EPOLL_CTL_DEL`, the fourth argument (`struct epoll_event *`) is documented as ignored by the kernel since Linux 2.6.9. Passing `NULL` instead of building a full `struct epoll_event` (memset + 2 field writes) eliminates ~4 instructions per DEL call. cascade_chain makes 100 DEL calls per run_once, so this should save ~400ns = ~0.1–0.2%, potentially measurable via accumulated effects. Targeted `epoll_apply_one_change` in `epoll.c` (Tier 5 — per-backend dispatch overhead).
+
+---
+
+## Implementation Phase
+
+**Change**: Added a DEL fast-path before the struct construction block in `epoll_apply_one_change`:
+
+```c
+#ifndef EVENT__HAVE_WEPOLL
+if (op == EPOLL_CTL_DEL) {
+    if (epoll_ctl(epollop->epfd, EPOLL_CTL_DEL, ch->fd, NULL) == 0)
+        return 0;
+    if (errno == ENOENT || errno == EBADF || errno == EPERM)
+        return 0;
+    event_warn("epoll_ctl(DEL) on fd %d failed", ch->fd);
+    return -1;
+}
+#endif
+```
+
+Saves: `memset(&epev, 0, sizeof(epev))`, `epev.data.fd = ch->fd`, `epev.events = events` — 3 instructions eliminated per DEL call.
+
+**Correctness gate**: LIGHT — 370/370 tests pass.
+
+---
+
+## Step 1: Benchmark
+
+| Workload | Before (µs) | After (µs) | Δ% |
+|----------|-------------|------------|----|
+| cascade_bench | 137 | 137 | 0.0% (no change) |
+| cascade_chain | 272 | 273 | +0.4% (noise, within stddev) |
+
+Benchmark file: `experiments/EXP-009/bench-results/20260601-050902-redis-benchmark-coordinator-c4a.c.redislabs-cto.internal.txt`
+
+---
+
+## Decision
+
+**Status**: REJECT
+
+**Reason**: Zero improvement on cascade_bench; cascade_chain regressed +0.4% (noise, well within the ±19µs stddev). The `memset`+2-field overhead (~4 instructions ≈ 4ns) is completely dwarfed by the epoll_ctl syscall cost (~500ns). Userspace struct construction is not a bottleneck at any achievable scale with these benchmarks.
+
+---
+
+## Token Cost
+
+| Phase | Agent | Model | Notes |
+|-------|-------|-------|-------|
+| single-agent | c4a | claude-sonnet-4-6 | single-turn overnight run |
+
+---
+
+## Lessons
+
+1. The `struct epoll_event` construction overhead before `epoll_ctl` is negligible compared to the syscall cost itself. Even with 100 calls per run_once, the ~400ns saving is below the noise floor (~19µs stddev for cascade_chain). Do not target userspace syscall-argument construction for these workloads.
+2. For cascade_chain at 272µs, the bottleneck is the kernel time: 100 blocking epoll_wait calls + 100 epoll_ctl(DEL) calls. No amount of userspace micro-optimization in the argument preparation path will be measurable.
+3. The next optimizations must either reduce the NUMBER of syscalls (hard, given cascadebench architecture) or target a different bottleneck class entirely (evbuffer data plane, HTTP path).

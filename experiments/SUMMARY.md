@@ -5,7 +5,7 @@ Single source of truth for experiment status. Keep in sync with the README count
 | Status | Count |
 |--------|-------|
 | Accepted | 3 |
-| Rejected | 5 |
+| Rejected | 6 |
 | Parked | 0 |
 | In Progress | 0 |
 
@@ -28,6 +28,7 @@ Single source of truth for experiment status. Keep in sync with the README count
 | EXP-004 | 2026-06-01 | Zero-timeout fast path + changelist n_changes guard in epoll_dispatch (Tier 5a) | cascade_bench +0.7%, cascade_chain +0.4% (both noise) | Function call savings (~2 µs) invisible vs. 7 µs stddev; syscalls dominate, not userspace per-dispatch overhead |
 | EXP-005 | 2026-06-01 | EPOLLONESHOT for non-persistent events to skip epoll_ctl(DEL) (Tier 3/5) | Correctness fail | multiple_events_for_same_fd deadlock: EPOLLONESHOT fires and disables fd when first event fires, stranding other events on same fd; evmap only calls backend ADD for 0→1 transition |
 | EXP-006 | 2026-06-01 | timerfd absolute-deadline caching to skip redundant timerfd_settime (Tier 5a) | No change (dead code) | USING_TIMERFD is disabled when EVENT__HAVE_EPOLL_PWAIT2 is defined (Linux ≥5.11); the entire timerfd optimization path is compiled out; dispatch uses epoll_pwait2 with inline nanosecond timeout instead |
+| EXP-009 | 2026-06-01 | Pass NULL epev to epoll_ctl(EPOLL_CTL_DEL) to skip struct construction | cascade_bench 0%, cascade_chain +0.4% (noise) | memset+2-field overhead (~4ns) invisible vs kernel syscall cost (~500ns); not a measurable bottleneck at cascade scale |
 
 ## Parked
 
