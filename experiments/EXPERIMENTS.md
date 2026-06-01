@@ -503,3 +503,58 @@ cascade_chain: apparent 2 µs improvement is within the 5.29 µs stddev from bas
 **Correctness**: PASS (370/370 regress tests). Reverted after reject.
 **Files**: `experiments/EXP-012/bench-results/20260601-060722-*.txt`
 **Known Non-Starter added**: see `.claude/program.md`
+
+---
+
+## EXP-013 — 2026-06-01 — Tier 2a iovec sizing: `NUM_READ_IOVEC` 4→8 in `buffer.c` — REJECTED
+
+**Technique (Tier 2a)**: Increase the `NUM_READ_IOVEC` constant in `buffer.c` from 4 to 8.
+This constant controls how many `struct iovec` entries are allocated on the stack for `readv`
+in `evbuffer_read`. More iovecs allow the kernel to scatter-read into more evbuffer chains per
+`readv` call, reducing the syscall count for fragmented evbuffers or large reads.
+
+**Hypothesis**: Increasing `NUM_READ_IOVEC` from 4 to 8 will show 0% delta on cascade_bench
+and cascade_chain (both use raw `recv`/`send`, never calling `evbuffer_read`), confirming that
+Tier 2 iovec-sizing optimizations require an evbuffer-based benchmark (e.g., bench_http with
+an HTTP load generator) to validate.
+
+**Implementation**: Single `#define` change in `buffer.c` line 2230:
+```c
+- #define NUM_READ_IOVEC 4
++ #define NUM_READ_IOVEC 8
+```
+
+Reverted after benchmarking confirmed 0% delta.
+
+**Correctness**: PASS (370/370 regress tests).
+
+**Result**: REJECTED — 0% improvement on both workloads, exactly as predicted.
+
+| Workload | EXP-012 µs (p50) | EXP-013 µs (p50) | Δ% | Notes |
+|----------|-----------------|-----------------|-----|-------|
+| cascade_bench | 106 | 107 | +0.9% | within noise (stddev ~4.91 µs) |
+| cascade_chain | 153 | 154 | +0.7% | within noise (stddev ~6.07 µs) |
+
+**Root cause of rejection**: The cascade benchmarks (`bench -n 100 -a 1 -w 100` and
+`bench_cascade -n 100`) use raw `recv(fd, &ch, 1, 0)` / `send(fd, &ch, 1, 0)` calls in their
+callbacks and never invoke `evbuffer_read`. The `NUM_READ_IOVEC` constant only affects
+`evbuffer_read`'s readv path; any change to it is invisible to the current benchmark suite.
+The 0% delta is deterministic — not noise — confirming the root cause.
+
+**Key learning (methodology)**: The entire Tier 1–2 evbuffer optimization space (chain pooling,
+grow heuristics, iovec sizing, EVBUFFER_MAX_READ tuning, FIONREAD elision, write coalescing)
+is INAPPLICABLE to the current cascade benchmark suite. All Tier 1–2 techniques will show 0%
+delta by construction, not because they are ineffective, but because the measured workloads
+bypass the evbuffer data plane entirely.
+
+**Path to unblocking Tier 1–2**: The `bench_http` binary IS compiled and available at
+`build/main/bin/bench_http`. It exercises `evbuffer_add`, `evhttp_send_reply`, and the full
+HTTP buffering stack. Adding an HTTP load generator (`wrk` or `ab`) and a bench_http workload
+to `run-bench.sh` would expose the evbuffer data plane to measurement. Until then, all
+Tier 1–2 experiments should be parked (not rejected or added to Known Non-Starters) since
+the techniques are sound but unmeasurable.
+
+**DO NOT add to Known Non-Starters**: `NUM_READ_IOVEC` tuning is a valid optimization for
+evbuffer-based workloads. It belongs in the "needs bench_http" category, not "doesn't work."
+
+**Files**: `experiments/EXP-013/bench-results/20260601-063526-*.txt`

@@ -5,7 +5,7 @@ Single source of truth for experiment status. Keep in sync with the README count
 | Status | Count |
 |--------|-------|
 | Accepted | 1 |
-| Rejected | 11 |
+| Rejected | 12 |
 | Parked | 0 |
 | In Progress | 0 |
 
@@ -68,6 +68,11 @@ Single source of truth for experiment status. Keep in sync with the README count
   Expected saving (~100 ns) is permanently below the 5–7 µs noise floor. Closes all remaining
   Tier 3–6 dispatch-loop techniques. Future progress requires evbuffer benchmarks (Tier 1–2) or
   REPETITIONS ≥ 20 to lower the noise floor.
+- **EXP-013** (2026-06-01): `NUM_READ_IOVEC` 4→8 in `buffer.c` (Tier 2a iovec sizing) — 0% on
+  both workloads (cascade_bench: 106→107 µs, cascade_chain: 153→154 µs, both within noise).
+  Confirmed by construction: cascade benchmarks use raw `recv`/`send`, never calling `evbuffer_read`.
+  Entire Tier 1–2 evbuffer space is inapplicable to current bench suite. Technique is valid for
+  evbuffer workloads (e.g., bench_http + wrk) but unmeasurable without an HTTP load generator.
 
 ## Parked
 
