@@ -932,3 +932,67 @@ Benchmark file: `experiments/EXP-011/bench-results/20260601-054928-redis-benchma
 2. The lazy populate approach does fix the correctness issue from EXP-010 (all gettimeofday_cached tests pass), making it a valid technique — just not measurable at this scale. Could matter for workloads with >10,000 dispatches per second where the savings would aggregate.
 3. Time-cache optimizations in the dispatch loop are exhausted: EXP-007 (skip for NONBLOCK+empty, 5.6% on cascade_bench) and EXP-008 (use monotonic vs gettimeofday, 2.2% on cascade_chain) already captured the available gains. No further single-line time-cache tweaks will be measurable.
 4. Next experiments should target a different subsystem entirely — likely the evbuffer data plane (Tier 1) on a bufferevent-based benchmark, or the activation queue (Tier 4) with careful cycle counting to confirm CPU cost.
+
+## EXP-012 — 2026-06-01 — Tier 4a: Hoist invariant checks in event_process_active_single_queue
+
+## Status: REJECTED
+
+---
+
+## Selection Phase
+
+Single-agent run (c4a, claude-sonnet-4-6).
+
+**Hypothesis**: Reordering `if (count && endtime)` to `if (endtime && count)` (putting the invariant NULL pointer check first) and guarding `count >= max_to_process` with `max_to_process < INT_MAX &&` (short-circuiting the INT_MAX case) reduces per-event branch evaluation count in `event_process_active_single_queue`, saving ~0.5µs per 100-event run_once and improving throughput by ~0.5% on both cascade workloads.
+
+---
+
+## Implementation Phase
+
+**Changes (event.c)**:
+
+In `event_process_active_single_queue`, two modifications to the end-of-iteration checks:
+
+1. `if (count >= max_to_process)` → `if (max_to_process < INT_MAX && count >= max_to_process)`
+   - Puts the invariant comparison first; when max_to_process == INT_MAX (default), short-circuits immediately without evaluating count.
+
+2. `if (count && endtime)` → `if (endtime && count)`
+   - Puts the invariant NULL pointer check first; when endtime == NULL (default), short-circuits without evaluating count.
+
+**Correctness gate**: LIGHT — **PASS** (all 370 tests pass).
+
+---
+
+## Step 1: Benchmark
+
+| Workload | Before (µs) | After (µs) | Δ% |
+|----------|------------|-----------|-----|
+| cascade_bench | 137 | 138 | +0.7% (noise) |
+| cascade_chain | 273 | 271 | -0.7% (noise) |
+
+Benchmark file: `experiments/EXP-012/bench-results/20260601-063029-redis-benchmark-coordinator-c4a.c.redislabs-cto.internal.txt`
+
+---
+
+## Decision
+
+**Status**: REJECT
+
+**Reason**: Zero measurable improvement — cascade_bench +0.7% (worse/noise, stddev ~14µs), cascade_chain -0.7% (within noise, stddev ~9µs). The analysis proves why: both benchmarks dispatch exactly 1 event per `event_process_active_single_queue` call, so the optimization saves at most 2 comparisons × 1 event = 2 instructions = <1ns per cycle. For 100 cycles: <100ns = <0.07% of 137µs. Completely invisible against any noise floor.
+
+---
+
+## Token Cost
+
+| Phase | Agent | Model | Notes |
+|-------|-------|-------|-------|
+| single-agent | c4a | claude-sonnet-4-6 | single-turn overnight run |
+
+---
+
+## Lessons
+
+1. Tier 4a (branch elimination in event_process_active_single_queue) gives 3–10% ONLY when many events fire per dispatch cycle (the playbook's estimate assumes N>10 events/cycle). For 1-event-per-cycle workloads (both cascade benchmarks use a=1 active), the savings are N×(per-event savings) where N=1 — negligibly small.
+2. The cascade benchmarks are fundamentally 1-event-per-cycle serial chains. Any per-event dispatch optimization must deliver >2µs savings across 100 events to be measurable. At 1ns per saved instruction, that requires eliminating 2000+ instructions per run_once — far beyond what Tier 4 branch hoisting can achieve.
+3. The syscall count per cascade_chain step (epoll_pwait2 + recv + send + epoll_ctl_DEL ≈ 4 syscalls × 100 steps = 400 syscalls × ~150ns ≈ 60µs) dominates. Userspace optimizations must eliminate a full syscall equivalent (~150ns) to be measurable at the 2% threshold.
+4. Remaining Tier 4–6 techniques (activation-queue traversal, vtable devirtualization, single-threaded lock elision) are similarly bounded: each saves <100ns per run_once = <0.07% — all below the noise floor for these workloads. Further progress requires either (a) syscall reduction, (b) a different benchmark that exercises evbuffer/bufferevent (Tier 1–2), or (c) higher-concurrency workloads where per-event costs aggregate.

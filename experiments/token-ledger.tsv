@@ -1,1 +1,2 @@
 exp_id	phase	agent_id	model	tokens_in	tokens_out	cost_usd	timestamp	description
+EXP-012	single-agent	c4a	claude-sonnet-4-6	0	0	0	2026-06-01	single-turn overnight run
