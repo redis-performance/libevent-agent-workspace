@@ -146,3 +146,28 @@ the kernel won't re-deliver a bid until released).
 force-drain-on-teardown), (b) a copy-fallback under watermark / low free-buffer count to bound the
 pool, (c) regress tests for evbuffer-outlives-base (ASAN) and pool exhaustion. The win is real and
 wanted; the path is clear. Scoped as the next step.
+
+### Improvement #3 — zero-copy recv, HARDENED to merge-ready (v2/v3)
+
+The +40% was real but the v1 review (45/100) found a **teardown UAF** + a **shared-pool
+fairness** flaw. Hardened across two more rounds, each re-reviewed by the 7-maintainer panel:
+
+- **The UAF was real** — reproduced with a standalone program: an `evbuffer` (moved out of the
+  bufferevent) freed *after* `event_base_free()` → **SEGV in `event_io_uring_buf_release_`**.
+  The 377/377 + ASAN-clean suite had missed it because no test let an evbuffer outlive the base.
+- **v2**: refcounted `event_io_uring_bufpool` that **outlives the base** (cleanup never touches
+  freed `base->io_uring`) + low-water copy-fallback to bound the shared pool. **Re-review:
+  GO-WITH-FIXES 80/100, B1 closed ✓, B2 closed ✓** ("a real root-cause fix, not a band-aid").
+  But it caught a **new** refcount leak (ref reserved before `evbuffer_add_reference`; leaks on
+  failure) — and the sharp insight that the leak *"corrupts the B2 bound"* by inflating `inflight`.
+- **v3**: undo the reservation on `add_reference` failure + `EVUTIL_ASSERT(inflight>0)` guard +
+  checkpatch decl fixes + the two regress tests (`recv_ref_outlives_base`, `pool_pressure`).
+
+**Final state (branch `io-uring-zerocopy-recv`, `7ccce898`):** +39% (64p) / +13% (128p),
+full regress **379/379**, ASAN clean (incl. the once-SEGV repro), throughput-cost-free bound.
+All three blockers the panels raised (teardown UAF, fairness, refcount leak) are closed; the
+chair's stated merge conditions ("fix the leak, the checkpatch decls, and the assert") are met.
+
+**Net for PR #1866**: two upstreamable follow-ups — `io-uring-read-timeout` (82/100, closes the
+documented limitation) and `io-uring-zerocopy-recv` (a profile-driven +39% that the review loop
+turned from a UAF-carrying draft into a hardened, tested, bounded change).
