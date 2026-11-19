@@ -6,6 +6,9 @@ organized by tier and expected gain. Inspired by AutoKernel's program.md.
 Read this before each experiment to choose the next technique to try.
 After profiling, use the **Bottleneck Classification** section to pick the right tier.
 
+Use the mandatory [per-session performance MCP workflow](../docs/PERFORMANCE-MCP.md)
+before choosing a technique or interpreting a profile.
+
 Scope every change to `config/hot-methods.yaml`. Do not optimize control-plane / setup code.
 
 ---
